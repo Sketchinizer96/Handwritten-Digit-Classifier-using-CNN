@@ -1,0 +1,135 @@
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
+from tensorflow.keras.preprocessing.text import Tokenizer
+from tensorflow.keras.preprocessing.sequence import pad_sequences
+from tensorflow.keras.models import Sequential, load_model
+from tensorflow.keras.layers import Embedding, LSTM, Dense
+import joblib
+
+def load_data(file_path):
+    return pd.read_excel(file_path)
+
+def preprocess_data(df):
+    df['combined_text'] = df['Description'] + ' ' + df['Close Notes']
+    return df
+
+def tokenize_text(text_data, tokenizer=None):
+    if tokenizer is None:
+        tokenizer = Tokenizer()
+        tokenizer.fit_on_texts(text_data)
+    sequences = tokenizer.texts_to_sequences(text_data)
+    padded_sequences = pad_sequences(sequences, maxlen=100)
+    return padded_sequences, tokenizer
+
+def encode_labels(labels, label_encoder=None):
+    if label_encoder is None:
+        label_encoder = LabelEncoder()
+        label_encoder.fit(labels)
+    encoded_labels = label_encoder.transform(labels)
+    return encoded_labels, label_encoder
+
+def split_data(X, y):
+    return train_test_split(X, y, test_size=0.2, random_state=42)
+
+def build_model(input_dim, output_dim, max_length):
+    model = Sequential()
+    model.add(Embedding(input_dim=input_dim, output_dim=100, input_length=max_length))
+    model.add(LSTM(units=100))
+    model.add(Dense(units=output_dim, activation='softmax'))
+    return model
+
+def train_model(model, X_train, y_train, X_test, y_test, epochs=5, batch_size=64):
+    model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
+    model.fit(X_train, y_train, epochs=epochs, batch_size=batch_size, validation_data=(X_test, y_test))
+    return model
+
+def save_model(model, label_encoder, save_model_path='saved_model.h5', save_encoder_path='label_encoder.pkl'):
+    model.save(save_model_path)
+    print(f"Model saved to {save_model_path}")
+
+    # Save label encoder
+    joblib.dump(label_encoder, save_encoder_path)
+    print(f"Label encoder saved to {save_encoder_path}")
+
+def classify_tickets(file_path, model_path='saved_model.h5', encoder_path='label_encoder.pkl', output_path='output_data.xlsx'):
+    # Load existing model and label encoder
+    trained_model = load_model(model_path)
+    label_encoder = joblib.load(encoder_path)
+
+    # Load new data
+    new_data = load_data(file_path)
+
+    # Preprocess new data
+    new_data = preprocess_data(new_data)
+
+    # Tokenize text using the existing tokenizer
+    new_X, _ = tokenize_text(new_data['combined_text'], tokenizer)
+
+    # Predict labels using the trained model
+    predicted_labels = trained_model.predict_classes(new_X)
+
+    # Decode numerical labels back to original labels
+    predicted_categories = label_encoder.inverse_transform(predicted_labels)
+
+    # Add a new column for predicted labels in the DataFrame
+    new_data['Predicted Ticket Tag'] = predicted_categories
+
+    # Save the updated DataFrame with predictions
+    new_data.to_excel(output_path, index=False)
+    print(f"Predictions saved to {output_path}")
+
+# Unified workflow
+def main(file_path, save_model_path='saved_model.h5', save_encoder_path='label_encoder.pkl'):
+    # Load existing model and label encoder
+    try:
+        trained_model = load_model(save_model_path)
+        label_encoder = joblib.load(save_encoder_path)
+        print(f"Existing model loaded from {save_model_path}")
+    except (OSError, FileNotFoundError):
+        print("No existing model found. Creating a new model.")
+        trained_model, label_encoder = None, None
+
+    # Load data
+    df = load_data(file_path)
+    df = preprocess_data(df)
+
+    # Tokenize text and encode labels
+    X, tokenizer = tokenize_text(df['combined_text'])
+    y, label_encoder = encode_labels(df['Ticket Tag'])
+
+    # If an existing model exists, update it with the new data
+    if trained_model is not None:
+        X_train, X_test, y_train, y_test = split_data(X, y)
+
+        # Concatenate old and new data
+        X_combined = np.vstack([X_train, X])
+        y_combined = np.concatenate([y_train, y])
+
+        # Retrain the model
+        trained_model = train_model(trained_model, X_combined, y_combined, X_test, y_test)
+
+        # Save the updated model
+        save_model(trained_model, label_encoder, save_model_path, save_encoder_path)
+
+    # If no existing model, train a new one
+    else:
+        X_train, X_test, y_train, y_test = split_data(X, y)
+        trained_model = build_model(input_dim=len(tokenizer.word_index) + 1, output_dim=len(label_encoder.classes_), max_length=100)
+        trained_model = train_model(trained_model, X_train, y_train, X_test, y_test)
+
+        # Save the new model
+        save_model(trained_model, label_encoder, save_model_path, save_encoder_path)
+
+    return trained_model, label_encoder
+
+# Example usage
+file_path_train = 'your_data_train.xlsx'
+file_path_classify = 'new_data_to_classify.xlsx'
+
+# Train or update the model
+trained_model, label_encoder = main(file_path_train)
+
+# Classify new data
+classify_tickets(file_path_classify, model_path='saved_model.h5', encoder_path='label_encoder.pkl', output_path='output_data.xlsx')
