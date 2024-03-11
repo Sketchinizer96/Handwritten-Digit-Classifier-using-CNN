@@ -1,144 +1,73 @@
 import pandas as pd
-from sklearn.model_selection import train_test_split
+import re
+import spacy
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import classification_report, accuracy_score
-import joblib
-import nltk
-from nltk.corpus import stopwords
-from nltk.stem import WordNetLemmatizer
+from sklearn.preprocessing import MultiLabelBinarizer
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score, classification_report
+from sklearn.externals import joblib  # For saving the model
 
-nltk.download('stopwords')
-nltk.download('wordnet')
+# Load SpaCy model for English
+nlp = spacy.load("en_core_web_sm")
 
 def load_data(file_path):
     return pd.read_excel(file_path)
 
-def lemmatize_text(text):
-    lemmatizer = WordNetLemmatizer()
-    return ' '.join([lemmatizer.lemmatize(word) for word in text.split()])
+def clean_text(text):
+    # Remove non-alphabetic characters
+    text = re.sub('[^a-zA-Z]', ' ', str(text))
+    
+    # Lemmatization and spell correction using SpaCy
+    doc = nlp(text)
+    lemmatized_text = ' '.join([token.lemma_ for token in doc])
+    
+    # Remove specific words
+    custom_stopwords = ['word1', 'word2', 'etc.']  # Add your list of words to remove
+    lemmatized_text = ' '.join([word for word in lemmatized_text.split() if word not in custom_stopwords])
+    
+    return lemmatized_text
 
-def preprocess_data(df):
-    df['combined_text'] = (df['Description'].astype(str) + ' ' + df['Close Notes'].astype(str)).apply(lemmatize_text)
-    df['Configuration Item'] = df['Configuration Item'].astype(str)
-    df.drop(['Description', 'Close Notes'], axis=1, inplace=True)
-    return df
+def process_data(df):
+    df['clean_description'] = df['description'].apply(clean_text)
+    df['clean_close_notes'] = df['close_notes'].apply(clean_text)
+    df['combined_text'] = df['clean_description'] + ' ' + df['clean_close_notes']
+    return df[['combined_text', 'configuration_item']], df['ticket_tags']
 
-def split_data(df, test_size=0.2, random_state=42):
-    X = df['combined_text']
-    y = df['Ticket Tag']
-    return train_test_split(X, y, test_size=test_size, random_state=random_state)
+def train_model(X_train, y_train):
+    vectorizer = TfidfVectorizer(max_features=5000, stop_words='english')
+    X_train = vectorizer.fit_transform(X_train).toarray()
 
-def vectorize_text(X_train, X_test, max_features=5000):
-    stop_words = set(stopwords.words('english'))
-    tfidf_vectorizer = TfidfVectorizer(max_features=max_features, stop_words=stop_words)
-    X_train_tfidf = tfidf_vectorizer.fit_transform(X_train)
-    X_test_tfidf = tfidf_vectorizer.transform(X_test)
-    return X_train_tfidf, X_test_tfidf, tfidf_vectorizer
+    mlb = MultiLabelBinarizer()
+    y_train = mlb.fit_transform(y_train.apply(lambda x: str(x).split(',')))
 
-def train_random_forest(X_train_tfidf, y_train, n_estimators=100, random_state=42):
-    model = RandomForestClassifier(n_estimators=n_estimators, random_state=random_state)
-    model.fit(X_train_tfidf, y_train)
-    return model
+    X_train, X_test, y_train, y_test = train_test_split(X_train, y_train, test_size=0.2, random_state=42)
 
-def evaluate_model(model, X_test_tfidf, y_test):
-    y_pred = model.predict(X_test_tfidf)
+    model = RandomForestClassifier(n_estimators=100, random_state=42)
+    model.fit(X_train, y_train)
+
+    return model, vectorizer, mlb, X_test, y_test
+
+def evaluate_and_save(model, vectorizer, mlb, X_test, model_save_path):
+    y_pred = model.predict(X_test)
     accuracy = accuracy_score(y_test, y_pred)
-    print(f"Accuracy: {accuracy}")
+    report = classification_report(y_test, y_pred, target_names=mlb.classes_)
 
-    # Classification Report
-    print("Classification Report:")
-    print(classification_report(y_test, y_pred))
+    print(f'Accuracy: {accuracy}')
+    print('Classification Report:')
+    print(report)
 
-def save_model_and_vectorizer(model, tfidf_vectorizer, model_path='ticket_tag_model.joblib', vectorizer_path='tfidf_vectorizer.joblib'):
-    joblib.dump(model, model_path)
-    joblib.dump(tfidf_vectorizer, vectorizer_path)
-    print(f"Model and vectorizer saved to {model_path} and {vectorizer_path}")
+    joblib.dump(model, f'{model_save_path}/model.joblib')
+    print(f'Model saved at: {model_save_path}/model.joblib')
 
-def train_and_save_model(file_path):
-    # Load data
+def main():
+    file_path = 'your_data.xlsx'
+    model_save_path = input("Enter the path to save the model: ")
+
     df = load_data(file_path)
+    X, y = process_data(df)
+    model, vectorizer, mlb, X_test, y_test = train_model(X['combined_text'], y)
+    evaluate_and_save(model, vectorizer, mlb, X_test, model_save_path)
 
-    # Preprocess data
-    df = preprocess_data(df)
-
-    # Split data
-    X_train, X_test, y_train, y_test = split_data(df)
-
-    # TF-IDF Vectorization
-    X_train_tfidf, X_test_tfidf, tfidf_vectorizer = vectorize_text(X_train, X_test)
-
-    # Train a Random Forest Classifier
-    model = train_random_forest(X_train_tfidf, y_train)
-
-    # Evaluate the model
-    evaluate_model(model, X_test_tfidf, y_test)
-
-    # Save the trained model and vectorizer
-    save_model_and_vectorizer(model, tfidf_vectorizer)
-
-# Example usage
-file_path = 'your_data.xlsx'
-train_and_save_model(file_path)
-
-
-
-import pandas as pd
-import joblib
-
-def load_data(file_path):
-    return pd.read_excel(file_path)
-
-def preprocess_data(df):
-    df['combined_text'] = (df['Description'].astype(str) + ' ' + df['Close Notes'].astype(str)).apply(lemmatize_text)
-    df['Configuration Item'] = df['Configuration Item'].astype(str)
-    df.drop(['Description', 'Close Notes'], axis=1, inplace=True)
-    return df
-
-def lemmatize_text(text):
-    lemmatizer = WordNetLemmatizer()
-    return ' '.join([lemmatizer.lemmatize(word) for word in text.split()])
-
-def vectorize_text(X, tfidf_vectorizer):
-    return tfidf_vectorizer.transform(X)
-
-def predict_labels(model, X_tfidf):
-    return model.predict(X_tfidf)
-
-def load_model_and_vectorizer(model_path='ticket_tag_model.joblib', vectorizer_path='tfidf_vectorizer.joblib'):
-    model = joblib.load(model_path)
-    tfidf_vectorizer = joblib.load(vectorizer_path)
-    return model, tfidf_vectorizer
-
-def apply_model_to_new_data(file_path, model, tfidf_vectorizer):
-    # Load new data
-    df_new = load_data(file_path)
-
-    # Preprocess new data
-    df_new = preprocess_data(df_new)
-
-    # Vectorize text using the same TF-IDF vectorizer
-    X_new_tfidf = vectorize_text(df_new['combined_text'], tfidf_vectorizer)
-
-    # Predict labels using the trained model
-    predicted_labels = predict_labels(model, X_new_tfidf)
-
-    # Add the predicted labels to the new data
-    df_new['Predicted Ticket Tag'] = predicted_labels
-
-    # Optionally, you can save the new data with predicted labels to a new Excel file
-    df_new.to_excel('predicted_data.xlsx', index=False)
-
-    return df_new
-
-# Example usage
-file_path_new_data = 'new_data_without_ticket_tag.xlsx'
-
-# Load the trained model and vectorizer
-model, tfidf_vectorizer = load_model_and_vectorizer()
-
-# Apply the model to new data
-df_predicted = apply_model_to_new_data(file_path_new_data, model, tfidf_vectorizer)
-
-# Display the new data with predicted labels
-print(df_predicted)
+if __name__ == "__main__":
+    main()
