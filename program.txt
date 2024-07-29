@@ -384,3 +384,49 @@ def users():
 
 if __name__ == "__main__":
     get_command()
+
+
+Topic,Command,Description,Options,Generated Command Example
+API and Authentication,Set or view the target API endpoint,Set or view the target API endpoint,URL, Skip SSL Validation,cf api <URL> --skip-ssl-validation
+API and Authentication,Authenticate non-interactively,Authenticate non-interactively,Username, Password,cf auth <username> <password>
+API and Authentication,Log in to a Cloud Foundry instance,Log in to a Cloud Foundry instance,API URL, Username, Password, SSO, SSO Passcode,cf login -a <API_URL> -u <username> -p <password> --sso --sso-passcode <passcode>
+API and Authentication,Log out of a Cloud Foundry instance,Log out of a Cloud Foundry instance,None,cf logout
+Applications,Push an app,Push an app,App Name, Buildpack, Command, Domain, Manifest Path, No Start,cf push <app_name> -b <buildpack> -c '<command>' -d <domain> -f <manifest_path> --no-start
+Applications,List all apps,List all apps,None,cf apps
+Applications,Display health and status for an app,Display health and status for an app,App Name,cf app <app_name>
+Applications,Start an app,Start an app,App Name,cf start <app_name>
+Applications,Stop an app,Stop an app,App Name,cf stop <app_name>
+Applications,Restart an app,Restart an app,App Name,cf restart <app_name>
+Applications,Restage an app,Restage an app,App Name,cf restage <app_name>
+Applications,Delete an app,Delete an app,App Name, Force Delete,cf delete <app_name> -f
+Applications,Scale an app,Scale an app,App Name, Instances, Memory, Disk,cf scale <app_name> -i <instances> -m <memory> -k <disk>
+Applications,View logs for an app,View logs for an app,App Name, Recent,cf logs <app_name> --recent
+Applications,Show environment variables for an app,Show environment variables for an app,App Name,cf env <app_name>
+Applications,Set an environment variable for an app,Set an environment variable for an app,App Name, Environment Variable, Value,cf set-env <app_name> <env_var> <value>
+Applications,Remove an environment variable from an app,Remove an environment variable from an app,App Name, Environment Variable,cf unset-env <app_name> <env_var>
+Services,List all service instances,List all service instances,None,cf services
+Services,Create a service instance,Create a service instance,Service, Plan, Service Instance, Parameters, Tags,cf create-service <service> <plan> <service_instance> -c '<params>' -t '<tags>'
+Services,Bind a service instance to an app,Bind a service instance to an app,App Name, Service Instance, Parameters,cf bind-service <app_name> <service_instance> -c '<params>'
+Services,Unbind a service instance from an app,Unbind a service instance from an app,App Name, Service Instance,cf unbind-service <app_name> <service_instance>
+Services,Delete a service instance,Delete a service instance,Service Instance, Force Delete,cf delete-service <service_instance> -f
+Services,Show info for a service instance,Show info for a service instance,Service Instance,cf service <service_instance>
+Routes,List all routes,List all routes,None,cf routes
+Routes,Create a route,Create a route,Space, Domain, Hostname, Path,cf create-route <space> <domain> --hostname <hostname> --path <path>
+Routes,Delete a route,Delete a route,Domain, Hostname, Path, Force Delete,cf delete-route <domain> --hostname <hostname> --path <path> -f
+Routes,Map a route to an app,Map a route to an app,App Name, Domain, Hostname, Path,cf map-route <app_name> <domain> --hostname <hostname> --path <path>
+Routes,Unmap a route from an app,Unmap a route from an app,App Name, Domain, Hostname, Path,cf unmap-route <app_name> <domain> --hostname <hostname> --path <path>
+Organizations and Spaces,List all organizations,List all organizations,None,cf orgs
+Organizations and Spaces,Create an organization,Create an organization,Organization Name,cf create-org <org_name>
+Organizations and Spaces,Delete an organization,Delete an organization,Organization Name, Force Delete,cf delete-org <org_name> -f
+Organizations and Spaces,List all spaces,List all spaces,None,cf spaces
+Organizations and Spaces,Create a space,Create a space,Space Name, Organization Name,cf create-space <space_name> -o <org_name>
+Organizations and Spaces,Delete a space,Delete a space,Space Name, Force Delete,cf delete-space <space_name> -f
+Organizations and Spaces,Set or view the target organization and space,Set or view the target organization and space,Organization Name, Space Name,cf target -o <org_name> -s <space_name>
+Users,Create a new user,Create a new user,Username, Password,cf create-user <username> <password>
+Users,Delete a user,Delete a user,Username, Force Delete,cf delete-user <username> -f
+Users,List users in an organization,List users in an organization,Organization Name,cf org-users <org_name>
+Users,List users in a space,List users in a space,Organization Name, Space Name,cf space-users <org_name> <space_name>
+Users,Assign an organization role to a user,Assign an organization role to a user,Username, Organization Name, Role,cf set-org-role <username> <org_name> <role>
+Users,Remove an organization role from a user,Remove an organization role from a user,Username, Organization Name, Role,cf unset-org-role <username> <org_name> <role>
+Users,Assign a space role to a user,Assign a space role to a user,Username, Organization Name, Space Name, Role,cf set-space-role <username> <org_name> <space_name> <role>
+Users,Remove a space role from a user,Remove a space role from a user,Username, Organization Name, Space Name, Role,cf unset-space-role <username> <org_name> <space_name> <role>
