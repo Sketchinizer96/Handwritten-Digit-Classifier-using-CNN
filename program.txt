@@ -1,131 +1,35 @@
-import os
-import pandas as pd
-
-# Step 1: Set up the directory containing the Excel files
-directory = 'path_to_your_directory'
-
-# Dictionary to map month abbreviations to their numeric values for sorting
-month_map = {
-    'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6,
-    'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12
-}
-
-# Step 2: Get all Excel files in the directory
-files = [f for f in os.listdir(directory) if f.endswith('.xlsx')]
-
-# Step 3: Define a function to extract year and month from filenames
-def extract_year_month(filename):
-    # Assuming filenames are in format 'report_2024_aug.xlsx'
-    parts = filename.split('_')  # ['report', '2024', 'aug.xlsx']
-    year = int(parts[1])  # Extract the year
-    month_abbr = parts[2].split('.')[0]  # Extract the month abbreviation (e.g., 'aug')
-    month = month_map[month_abbr.lower()]  # Convert month abbreviation to its numeric value
-    return year, month
-
-# Step 4: Sort the files based on year and month (descending order)
-sorted_files = sorted(files, key=lambda f: extract_year_month(f), reverse=True)
-
-# Step 5: Initialize an empty dataframe to hold the merged data
-merged_data = pd.DataFrame()
-
-# Step 6: Loop through the sorted files (from latest to earliest)
-for file in sorted_files:
-    # Extract year and month from the filename
-    year, month = extract_year_month(file)
-    
-    # Read the Excel file into a dataframe
-    file_path = os.path.join(directory, file)
-    df = pd.read_excel(file_path)
-    
-    # Add 'Year' and 'Month' columns to the dataframe
-    df['Year'] = year
-    df['Month'] = month
-    
-    # Merge data while keeping only unique Incident IDs (favoring the most recent file)
-    if merged_data.empty:
-        merged_data = df
-    else:
-        # Concatenate and drop duplicates based on 'Incident ID', keeping the most recent one
-        merged_data = pd.concat([df, merged_data]).drop_duplicates(subset='Incident ID', keep='first')
-
-# Step 7: Save the merged data to a new Excel file
-output_file = os.path.join(directory, 'Merged_Incidents.xlsx')
-merged_data.to_excel(output_file, index=False)
-
-print(f"Data has been merged and saved to {output_file}")
-
-
-import requests
-import pandas as pd
-import time
-import logging
-
-# Configure logging
-logging.basicConfig(
-    filename='api_responses.log',  # Log file name
-    level=logging.INFO,  # Log level
-    format='%(asctime)s - Row: %(message)s'  # Log format
-)
-
-# Read the Excel file
-excel_file = "params.xlsx"  # Replace with your Excel file name
-sheet_name = "Sheet1"  # Replace with the sheet name if necessary
-
-# Load the Excel file into a pandas DataFrame
-df = pd.read_excel(excel_file, sheet_name=sheet_name)
-
-# API endpoint
-url = "https://api.example.com/endpoint"
-
-# ADFS token
-adfs_token = "your_adfs_token_here"  # Replace with your actual ADFS token
-
-# Headers, including the ADFS token for authorization
-headers = {
-    "Authorization": f"Bearer {adfs_token}"
-}
-
-# Loop through each row in the DataFrame
-for index, row in df.iterrows():
-    # Extract parameters for the current row
-    params = {
-        "param1": row['param1'],  # Replace 'param1' with the actual column name in your Excel
-        "param2": row['param2'],  # Replace 'param2' with the actual column name in your Excel
-        "param3": row['param3'],  # Replace 'param3' with the actual column name in your Excel
-    }
-
-    try:
-        # Sending the GET request
-        response = requests.get(url, headers=headers, params=params)
-
-        # Checking the status code
-        if response.status_code == 200:
-            # Successful request, log
-
-
 import xlwings as xw
 import requests
 import time
+import base64
 
-# Step 1: Set your ADFS token
-adfs_token = '<your-adfs-token>'
+# Step 1: Set your username and password for Basic Authentication
+username = 'your_username'
+password = 'your_password'
+
+# Encode the username and password using base64 encoding
+credentials = f"{username}:{password}"
+encoded_credentials = base64.b64encode(credentials.encode()).decode()
 
 # Step 2: Open the Excel file using xlwings
 file_path = 'path_to_your_file.xlsx'
 wb = xw.Book(file_path)  # Open the Excel file
 sheet = wb.sheets[0]     # Select the first sheet
 
-# Step 3: Read the IDs from the first column (assuming 'ID' is in column A)
-ids = sheet.range('A2:A' + str(sheet.cells.last_cell.row)).value  # Adjust range as needed
+# Step 3: Automatically determine the last row in the first column (column A)
+last_row = sheet.range('A' + str(sheet.cells.last_cell.row)).end('up').row
+
+# Read the IDs from the first column dynamically (column A)
+ids = sheet.range(f'A2:A{last_row}').value  # Adjust to start from row 2 if needed
 
 # Loop through each ID, send the request, and update Excel in real-time
 for i, id_value in enumerate(ids, start=2):  # Start from row 2
     # Construct the URL with the current ID
     url = f"http://example.com/api/resource/{id_value}"
     
-    # Prepare the headers with the ADFS token for authorization
+    # Prepare the headers with Basic Authentication
     headers = {
-        'Authorization': f'Bearer {adfs_token}',
+        'Authorization': f'Basic {encoded_credentials}',
         'Content-Type': 'application/json'
     }
     
