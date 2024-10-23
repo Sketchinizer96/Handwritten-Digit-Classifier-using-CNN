@@ -3,6 +3,8 @@ import requests
 import time
 import base64
 import concurrent.futures
+import os
+import mimetypes
 
 # Replace with actual credentials
 username = 'admin'
@@ -20,42 +22,54 @@ sheet = wb.sheets[0]
 # Find the last row with data in column A
 last_row = sheet.range('A' + str(sheet.cells.last_cell.row)).end('up').row
 ids = sheet.range(f"A2:A{last_row}").value
+file_names = sheet.range(f"B2:B{last_row}").value  # Column B contains file names
+folders = sheet.range(f"C2:C{last_row}").value     # Column C contains folder names
 
-# Function to process each API request
-def fetch_api_data(id_value):
+# Function to download any file type
+def download_file(id_value, file_name, folder_name):
     url = f"http://your_api_endpoint/{id_value}"
     headers = {
         'Authorization': f'Basic {encoded_credentials}',
-        'Content-Type': 'application/json'
     }
+    
+    # Ensure the folder exists
+    save_folder = os.path.join(folder_name)
+    os.makedirs(save_folder, exist_ok=True)
     
     try:
         response = requests.get(url, headers=headers)
         if response.status_code == 200:
-            data = response.json()
-            count = data.get("count", 0)
+            # Determine file extension from content-type
+            content_type = response.headers.get('Content-Type', '')
+            extension = mimetypes.guess_extension(content_type.split(";")[0])
+            if not extension:
+                extension = ".bin"  # Fallback to binary if unknown
+
+            # Save the file
+            file_path = os.path.join(save_folder, f"{file_name}{extension}")
+            with open(file_path, 'wb') as f:
+                f.write(response.content)
+            return id_value, "Success"
         else:
-            count = 0
+            return id_value, f"Failed with status code {response.status_code}"
     except Exception as e:
-        print(f"Error processing ID {id_value}: {e}")
-        count = 0
+        return id_value, f"Error: {e}"
 
-    return id_value, count  # Return the ID and the result count
-
-# Collect all the API data using ThreadPoolExecutor
+# Collect all the download results using ThreadPoolExecutor
 results = []
 with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-    futures = {executor.submit(fetch_api_data, id_value): i for i, id_value in enumerate(ids, start=2)}
+    futures = {executor.submit(download_file, id_value, file_name, folder): i 
+               for i, (id_value, file_name, folder) in enumerate(zip(ids, file_names, folders), start=2)}
     for future in concurrent.futures.as_completed(futures):
-        id_value, count = future.result()
-        results.append((id_value, count))
+        id_value, status = future.result()
+        results.append((id_value, status))
 
 # Now write the results to Excel (main thread)
-for row, (id_value, count) in enumerate(results, start=2):
-    sheet.range(f'B{row}').value = count
-    print(f"Processed ID {id_value} - Count: {count}")
+for row, (id_value, status) in enumerate(results, start=2):
+    sheet.range(f'D{row}').value = status  # Write the status in column D
+    print(f"Processed ID {id_value} - Status: {status}")
 
 # Save the workbook after processing
 wb.save(file_path)
 
-print("Process completed."))
+print("Process completed.")
