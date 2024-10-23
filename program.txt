@@ -1,73 +1,66 @@
 import xlwings as xw
 import requests
-import time
-import base64
-import concurrent.futures
 import os
-import mimetypes
-
-# Replace with actual credentials
-username = 'admin'
-password = 'your_password'
-
-# Encode the credentials for basic authentication
-credentials = f"{username}:{password}"
-encoded_credentials = base64.b64encode(credentials.encode()).decode()
+import re
+from urllib.parse import unquote
 
 # File path input
-file_path = input("Please enter excel path: ")
+file_path = input("Please enter the Excel path: ")
 wb = xw.Book(file_path)
 sheet = wb.sheets[0]
 
-# Find the last row with data in column A
+# Find the last row with data in column A (Image IDs)
 last_row = sheet.range('A' + str(sheet.cells.last_cell.row)).end('up').row
-ids = sheet.range(f"A2:A{last_row}").value
-file_names = sheet.range(f"B2:B{last_row}").value  # Column B contains file names
-folders = sheet.range(f"C2:C{last_row}").value     # Column C contains folder names
+image_ids = sheet.range(f"A2:A{last_row}").value  # Image ID column
+file_names = sheet.range(f"B2:B{last_row}").value  # Filename column (optional)
+folder_names = sheet.range(f"C2:C{last_row}").value  # Folder column
 
-# Function to download any file type
-def download_file(id_value, file_name, folder_name):
-    url = f"http://your_api_endpoint/{id_value}"
-    headers = {
-        'Authorization': f'Basic {encoded_credentials}',
-    }
+# Function to download and save the file
+def download_file(image_id, file_name, folder_name):
+    # Base API endpoint
+    url = f"http://your_api_endpoint?image_id={image_id}"
     
-    # Ensure the folder exists
-    save_folder = os.path.join(folder_name)
-    os.makedirs(save_folder, exist_ok=True)
+    headers = {
+        'Authorization': 'Bearer your_token',  # Add your authorization token or headers here
+    }
     
     try:
         response = requests.get(url, headers=headers)
         if response.status_code == 200:
-            # Determine file extension from content-type
-            content_type = response.headers.get('Content-Type', '')
-            extension = mimetypes.guess_extension(content_type.split(";")[0])
-            if not extension:
-                extension = ".bin"  # Fallback to binary if unknown
-
+            # Ensure the folder exists or create it
+            os.makedirs(folder_name, exist_ok=True)
+            
+            # If the filename is not provided, use the one from the API response
+            if not file_name:
+                content_disp = response.headers.get('Content-Disposition', '')
+                file_name = re.findall('filename="(.+)"', content_disp)
+                file_name = unquote(file_name[0]) if file_name else f"{image_id}.bin"  # Fallback if no filename in headers
+            
+            # Construct the full path to save the file
+            full_path = os.path.join(folder_name, file_name)
+            
             # Save the file
-            file_path = os.path.join(save_folder, f"{file_name}{extension}")
-            with open(file_path, 'wb') as f:
+            with open(full_path, 'wb') as f:
                 f.write(response.content)
-            return id_value, "Success"
+            
+            return f"Success - Saved as {file_name}"
         else:
-            return id_value, f"Failed with status code {response.status_code}"
+            return f"Failed - Status code {response.status_code}"
     except Exception as e:
-        return id_value, f"Error: {e}"
+        return f"Error: {e}"
 
-# Collect all the download results using ThreadPoolExecutor
-results = []
-with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-    futures = {executor.submit(download_file, id_value, file_name, folder): i 
-               for i, (id_value, file_name, folder) in enumerate(zip(ids, file_names, folders), start=2)}
-    for future in concurrent.futures.as_completed(futures):
-        id_value, status = future.result()
-        results.append((id_value, status))
-
-# Now write the results to Excel (main thread)
-for row, (id_value, status) in enumerate(results, start=2):
-    sheet.range(f'D{row}').value = status  # Write the status in column D
-    print(f"Processed ID {id_value} - Status: {status}")
+# Iterate over each row in the Excel sheet and process the records
+for i, (image_id, file_name, folder_name) in enumerate(zip(image_ids, file_names, folder_names), start=2):
+    if image_id and folder_name:  # Ensure necessary fields are present
+        # Call the download function
+        status = download_file(image_id, file_name, folder_name)
+        
+        # Write the status in column D
+        sheet.range(f'D{i}').value = status
+        print(f"Processed Image ID {image_id} - Status: {status}")
+    else:
+        sheet.range(f'D{i}').value = "Missing Image ID or Folder"
+        print(f"Skipped Image ID {image_id} - Missing ID or Folder")
 
 # Save the workbook after processing
 wb.save(file_path)
