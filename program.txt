@@ -1,121 +1,61 @@
-import pandas as pd
-import nltk
-import re
-from collections import Counter
-from nltk.corpus import stopwords
-from nltk.stem import WordNetLemmatizer
-import json
+import xlwings as xw
+import requests
+import time
+import base64
+import concurrent.futures
 
-# Step 1: Install NLTK resources
-nltk.download('stopwords')
-nltk.download('punkt')
-nltk.download('wordnet')
+# Replace with actual credentials
+username = 'admin'
+password = 'your_password'
 
-# Step 2: Load the Excel file
-file_path = 'path_to_your_file.xlsx'  # Replace with your file path
-df = pd.read_excel(file_path)
+# Encode the credentials for basic authentication
+credentials = f"{username}:{password}"
+encoded_credentials = base64.b64encode(credentials.encode()).decode()
 
-# Step 3: Initialize NLTK components
-lemmatizer = WordNetLemmatizer()
-stop_words = set(stopwords.words('english'))
+# File path input
+file_path = input("Please enter excel path: ")
+wb = xw.Book(file_path)
+sheet = wb.sheets[0]
 
-# Step 4: Define the text cleaning function
-def clean_comment(comment):
-    # Convert to lowercase
-    comment = comment.lower()
+# Find the last row with data in column A
+last_row = sheet.range('A' + str(sheet.cells.last_cell.row)).end('up').row
+ids = sheet.range(f"A2:A{last_row}").value
+
+# Function to process each API request
+def fetch_api_data(id_value):
+    url = f"http://your_api_endpoint/{id_value}"
+    headers = {
+        'Authorization': f'Basic {encoded_credentials}',
+        'Content-Type': 'application/json'
+    }
     
-    # Remove punctuation and numbers
-    comment = re.sub(r'[^\w\s]', '', comment)
-    comment = re.sub(r'\d+', '', comment)
-    
-    # Tokenize
-    words = nltk.word_tokenize(comment)
-    
-    # Remove stopwords
-    words = [word for word in words if word not in stop_words]
-    
-    # Lemmatize
-    words = [lemmatizer.lemmatize(word) for word in words]
-    
-    return words
+    try:
+        response = requests.get(url, headers=headers)
+        if response.status_code == 200:
+            data = response.json()
+            count = data.get("count", 0)
+        else:
+            count = 0
+    except Exception as e:
+        print(f"Error processing ID {id_value}: {e}")
+        count = 0
 
-# Step 5: Apply the cleaning function to the comments
-df['cleaned_comments'] = df['comments'].apply(clean_comment)
+    return id_value, count  # Return the ID and the result count
 
-# Step 6: Group by tags and find the most common words
-tagged_words = df.groupby('tags')['cleaned_comments'].apply(lambda x: [word for comment in x for word in comment])
+# Collect all the API data using ThreadPoolExecutor
+results = []
+with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+    futures = {executor.submit(fetch_api_data, id_value): i for i, id_value in enumerate(ids, start=2)}
+    for future in concurrent.futures.as_completed(futures):
+        id_value, count = future.result()
+        results.append((id_value, count))
 
-# Count the most common words for each tag
-common_words_by_tag = tagged_words.apply(lambda words: Counter(words).most_common())
+# Now write the results to Excel (main thread)
+for row, (id_value, count) in enumerate(results, start=2):
+    sheet.range(f'B{row}').value = count
+    print(f"Processed ID {id_value} - Count: {count}")
 
-# Step 7: Convert the output to a dictionary for JSON serialization
-output_dict = {tag: dict(common_words) for tag, common_words in common_words_by_tag.items()}
+# Save the workbook after processing
+wb.save(file_path)
 
-# Step 8: Save the output as a JSON file
-output_file_path = 'common_words_by_tag.json'  # Replace with your desired output file path
-with open(output_file_path, 'w') as json_file:
-    json.dump(output_dict, json_file, indent=4)
-
-print(f"Output saved to {output_file_path}")
-
-
---------------
-
-def clean_comment(comment):
-    # Convert to lowercase
-    comment = comment.lower()
-    
-    # Remove punctuation and numbers
-    comment = re.sub(r'[^\w\s]', '', comment)
-    comment = re.sub(r'\d+', '', comment)
-    
-    # Tokenize
-    words = word_tokenize(comment)
-    
-    # Remove stopwords
-    stop_words = set(stopwords.words('english'))
-    words = [word for word in words if word not in stop_words]
-    
-    # Lemmatization
-    lemmatizer = WordNetLemmatizer()
-    words = [lemmatizer.lemmatize(word) for word in words]
-    
-    # Join words back into a single string
-    cleaned_comment = ' '.join(words)
-    
-    return cleaned_comment
-
--------
-
-import spacy
-import contractions
-from collections import Counter
-from nltk.corpus import stopwords
-from nltk.stem import WordNetLemmatizer
-from nltk.corpus import wordnet
-
-nlp = spacy.load("en_core_web_sm")
-lemmatizer = WordNetLemmatizer()
-stop_words = set(stopwords.words('english') + ['product', 'service'])
-
-def get_wordnet_pos(word):
-    tag = nltk.pos_tag([word])[0][1][0].upper()
-    tag_dict = {"J": wordnet.ADJ, "N": wordnet.NOUN, "V": wordnet.VERB, "R": wordnet.ADV}
-    return tag_dict.get(tag, wordnet.NOUN)
-
-def clean_comment_advanced(comment):
-    # Expand contractions
-    comment = contractions.fix(comment)
-    
-    # Use SpaCy to tokenize and remove non-alphabetic characters
-    doc = nlp(comment)
-    words = [token.text.lower() for token in doc if token.is_alpha]
-    
-    # Remove stopwords and lemmatize
-    words = [lemmatizer.lemmatize(word, get_wordnet_pos(word)) for word in words if word not in stop_words]
-    
-    # Filter out rare words (example: words that appear in less than 5 documents)
-    word_counts = Counter(words)
-    words = [word for word in words if word_counts[word] >= 5]
-    
-    return ' '.join(words)
+print("Process completed."))
