@@ -1,68 +1,84 @@
 import xlwings as xw
 import requests
 import os
-import re
-from urllib.parse import unquote
 
-# File path input
-file_path = input("Please enter the Excel path: ")
-wb = xw.Book(file_path)
-sheet = wb.sheets[0]
+# Dictionary mapping 'id' to text file paths
+file_references = {
+    'abc': 'path_to_your_text_files/abc.txt',
+    'def': 'path_to_your_text_files/def.txt',
+    # Add more id-file mappings as needed
+}
 
-# Find the last row with data in column A (Image IDs)
-last_row = sheet.range('A' + str(sheet.cells.last_cell.row)).end('up').row
-image_ids = sheet.range(f"A2:A{last_row}").value  # Image ID column
-file_names = sheet.range(f"B2:B{last_row}").value  # Filename column (optional)
-folder_names = sheet.range(f"C2:C{last_row}").value  # Folder column
-
-# Function to download and save the file
-def download_file(image_id, file_name, folder_name):
-    # Base API endpoint
-    url = f"http://your_api_endpoint?image_id={image_id}"
+# Function to load data from Excel
+def load_excel_data(sheet):
+    data = []
+    last_row = sheet.range('A' + str(sheet.cells.last_cell.row)).end('up').row
     
-    headers = {
-        'Authorization': 'Bearer your_token',  # Add your authorization token or headers here
+    for row in range(2, last_row + 1):  # Assuming row 1 has headers
+        id_value = sheet.range(f'A{row}').value  # ID in column A
+        description = sheet.range(f'B{row}').value  # Description in column B
+        close_notes = sheet.range(f'C{row}').value  # Close notes in column C
+        data.append((id_value, description, close_notes, row))  # Append row number for later reference
+    return data
+
+# Function to read text file content based on the 'id'
+def read_text_file(id_value):
+    text_file_path = file_references.get(id_value)
+    if text_file_path and os.path.exists(text_file_path):
+        with open(text_file_path, 'r') as file:
+            return file.read()
+    return ""  # Return empty string if no file found
+
+# Function to call the API
+def call_api(description_close_notes, text_file_content):
+    url = 'your_api_endpoint_here'
+    
+    # Prepare the data payload for the API request
+    data = {
+        "input1": description_close_notes,
+        "input2": text_file_content
     }
     
-    try:
-        response = requests.get(url, headers=headers)
-        if response.status_code == 200:
-            # Ensure the folder exists or create it
-            os.makedirs(folder_name, exist_ok=True)
-            
-            # If the filename is not provided, use the one from the API response
-            if not file_name:
-                content_disp = response.headers.get('Content-Disposition', '')
-                file_name = re.findall('filename="(.+)"', content_disp)
-                file_name = unquote(file_name[0]) if file_name else f"{image_id}.bin"  # Fallback if no filename in headers
-            
-            # Construct the full path to save the file
-            full_path = os.path.join(folder_name, file_name)
-            
-            # Save the file
-            with open(full_path, 'wb') as f:
-                f.write(response.content)
-            
-            return f"Success - Saved as {file_name}"
-        else:
-            return f"Failed - Status code {response.status_code}"
-    except Exception as e:
-        return f"Error: {e}"
+    # Make the API call
+    response = requests.post(url, json=data)
+    
+    # Ensure the response is successful
+    if response.status_code == 200:
+        return response.json().get('tag', None)  # Return the tag from the response
+    return None
 
-# Iterate over each row in the Excel sheet and process the records
-for i, (image_id, file_name, folder_name) in enumerate(zip(image_ids, file_names, folder_names), start=2):
-    if image_id and folder_name:  # Ensure necessary fields are present
-        # Call the download function
-        status = download_file(image_id, file_name, folder_name)
+# Function to save results (tag) back to the Excel file in 'Ticket tag' column (assumed column D)
+def save_results_to_excel(sheet, row, tag):
+    sheet.range(f'D{row}').value = tag  # 'Ticket tag' column is D
+
+# Main function to control the flow
+def main():
+    # Open the Excel workbook and get the sheet
+    excel_path = 'path_to_your_excel_file.xlsx'
+    wb = xw.Book(excel_path)
+    sheet = wb.sheets['Sheet1']  # Replace 'Sheet1' with your actual sheet name
+    
+    # Load data from the Excel file
+    data = load_excel_data(sheet)
+    
+    # Process each record
+    for id_value, description, close_notes, row in data:
+        # Prepare input1 (description + close notes)
+        description_close_notes = f"{description} {close_notes}"
         
-        # Write the status in column D
-        sheet.range(f'D{i}').value = status
-        print(f"Processed Image ID {image_id} - Status: {status}")
-    else:
-        sheet.range(f'D{i}').value = "Missing Image ID or Folder"
-        print(f"Skipped Image ID {image_id} - Missing ID or Folder")
+        # Read input2 (text file content) based on the id
+        text_file_content = read_text_file(id_value)
+        
+        # Call the API
+        tag = call_api(description_close_notes, text_file_content)
+        
+        # Save the tag back into the 'Ticket tag' column for this row
+        save_results_to_excel(sheet, row, tag)
+    
+    # Save the updated Excel file
+    wb.save(excel_path)
+    wb.close()
 
-# Save the workbook after processing
-wb.save(file_path)
-
-print("Process completed.")
+# Run the main function
+if __name__ == '__main__':
+    main()
