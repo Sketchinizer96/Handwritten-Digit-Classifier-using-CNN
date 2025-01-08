@@ -1,84 +1,38 @@
-import xlwings as xw
 import requests
-import os
 
-# Dictionary mapping 'id' to text file paths
-file_references = {
-    'abc': 'path_to_your_text_files/abc.txt',
-    'def': 'path_to_your_text_files/def.txt',
-    # Add more id-file mappings as needed
-}
+def clear_token_file():
+    """Clears the token file at the start of execution."""
+    with open("token.txt", "w") as file:
+        file.write("")
+    print("Token file cleared.")
 
-# Function to load data from Excel
-def load_excel_data(sheet):
-    data = []
-    last_row = sheet.range('A' + str(sheet.cells.last_cell.row)).end('up').row
-    
-    for row in range(2, last_row + 1):  # Assuming row 1 has headers
-        id_value = sheet.range(f'A{row}').value  # ID in column A
-        description = sheet.range(f'B{row}').value  # Description in column B
-        close_notes = sheet.range(f'C{row}').value  # Close notes in column C
-        data.append((id_value, description, close_notes, row))  # Append row number for later reference
-    return data
-
-# Function to read text file content based on the 'id'
-def read_text_file(id_value):
-    text_file_path = file_references.get(id_value)
-    if text_file_path and os.path.exists(text_file_path):
-        with open(text_file_path, 'r') as file:
-            return file.read()
-    return ""  # Return empty string if no file found
-
-# Function to call the API
-def call_api(description_close_notes, text_file_content):
-    url = 'your_api_endpoint_here'
-    
-    # Prepare the data payload for the API request
-    data = {
-        "input1": description_close_notes,
-        "input2": text_file_content
+def generate_token():
+    url = "https://example.com/auth"  # Replace with the authentication URL
+    payload = {
+        "username": "your_username",  # Replace with your username
+        "password": "your_password",  # Replace with your password
+        "grant_type": "client_credentials"
     }
-    
-    # Make the API call
-    response = requests.post(url, json=data)
-    
-    # Ensure the response is successful
+    headers = {
+        "Content-Type": "application/json"
+    }
+
+    response = requests.post(url, json=payload, headers=headers)
     if response.status_code == 200:
-        return response.json().get('tag', None)  # Return the tag from the response
-    return None
+        token = response.json().get("access_token")  # Adjust the key based on the API response
+        return token
+    else:
+        print("Failed to generate token:", response.text)
+        return None
 
-# Function to save results (tag) back to the Excel file in 'Ticket tag' column (assumed column D)
-def save_results_to_excel(sheet, row, tag):
-    sheet.range(f'D{row}').value = tag  # 'Ticket tag' column is D
-
-# Main function to control the flow
-def main():
-    # Open the Excel workbook and get the sheet
-    excel_path = 'path_to_your_excel_file.xlsx'
-    wb = xw.Book(excel_path)
-    sheet = wb.sheets['Sheet1']  # Replace 'Sheet1' with your actual sheet name
+if __name__ == "__main__":
+    # Clear the token file at the start of execution
+    clear_token_file()
     
-    # Load data from the Excel file
-    data = load_excel_data(sheet)
-    
-    # Process each record
-    for id_value, description, close_notes, row in data:
-        # Prepare input1 (description + close notes)
-        description_close_notes = f"{description} {close_notes}"
-        
-        # Read input2 (text file content) based on the id
-        text_file_content = read_text_file(id_value)
-        
-        # Call the API
-        tag = call_api(description_close_notes, text_file_content)
-        
-        # Save the tag back into the 'Ticket tag' column for this row
-        save_results_to_excel(sheet, row, tag)
-    
-    # Save the updated Excel file
-    wb.save(excel_path)
-    wb.close()
-
-# Run the main function
-if __name__ == '__main__':
-    main()
+    # Generate a new token
+    token = generate_token()
+    if token:
+        with open("token.txt", "w") as file:
+            file.write(token)
+        print("Token saved to token.txt")
+‐---------
