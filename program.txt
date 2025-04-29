@@ -1,128 +1,106 @@
-# splunk_llm_agent.py
+flowchart TD
+    %% Top-Level
+    A[Multi-Agent Organization]
 
-import json
-import re
-import requests
-from functools import lru_cache
+    %% Agent Orchestration Layer
+    A --> B[Agent Orchestration Layer]
+    B --> B1[Orchestration Controller]
+    B --> B2[Agent Directory Service]
+    B --> B3[Communication Broker]
+    B --> B4[Coordination Mechanisms]
 
-# ========== Config ==========
-with open("app_host_mapping.json") as f:
-    APP_HOST_MAPPING = json.load(f)
+    %% Agent Organization Types
+    A --> C[Agent Organization Types]
+    C --> C1[Hierarchical]
+    C --> C2[Holonic]
+    C --> C3[Coalition-Based]
+    C --> C4[Market-Based]
 
-SPLUNK_USERNAME = "your_splunk_username"
-SPLUNK_PASSWORD = "your_splunk_password"
-CUSTOM_LLM_API_URL = "https://your.custom.llm/api/generate"
-CUSTOM_LLM_API_TOKEN = "your_llm_token"
+    %% Individual Agent Architecture
+    A --> D[Individual Agent Architecture (Enhanced BDI)]
+    D --> D1[Belief System]
+    D --> D2[Desire Engine]
+    D --> D3[Intention Planner]
+    D --> D4[Meta-Cognitive Layer]
+    D --> D5[Memory Systems]
 
-# ========== Cache ==========
-@lru_cache(maxsize=100)
-def cache_result(key, value):
-    return value
+    D5 --> D5a[Working Memory]
+    D5 --> D5b[Episodic Memory]
+    D5 --> D5c[Semantic Memory]
+    D5 --> D5d[Procedural Memory]
+    D5 --> D5e[External Memory (Vector DBs)]
 
-# ========== App ID Extraction ==========
-def extract_app_id(question):
-    match = re.search(r"\b\d{4,}\b", question)
-    return match.group() if match else None
+    %% Environment Interface
+    A --> E[Environment Interface]
+    E --> E1[Perception Systems]
+    E --> E2[Action Execution]
+    E --> E3[Tool Use Framework]
+    E --> E4[Digital Environment Modeling]
 
-# ========== Query Generator ==========
-def generate_splunk_query(user_question):
-    headers = {
-        "Authorization": f"Bearer {CUSTOM_LLM_API_TOKEN}",
-        "Content-Type": "application/json"
-    }
+    %% Foundation Models
+    A --> F[Foundation Models & Multimodal Processing]
+    F --> F1[LLM Integration]
+    F --> F2[Model Selection & Routing]
+    F --> F3[Multimodal Processing]
 
-    payload = {
-        "llm_service": "gpt4",
-        "question": user_question,
-        "few_shot": "",
-        "prompt": "Generate a Splunk query using the index parameter.",
-        "user_given_context": "Splunk query assistant",
-        "output_type": "json_object"
-    }
+    %% Communication Infrastructure
+    A --> G[Communication Infrastructure]
+    G --> G1[Message Structure]
+    G --> G2[Transport Mechanisms]
+    G --> G3[Communication Patterns]
+    G --> G4[Conversation Protocols]
 
-    try:
-        response = requests.post(CUSTOM_LLM_API_URL, json=payload, headers=headers)
-        response.raise_for_status()
-        return response.json().get("query")
-    except Exception as e:
-        print(f"LLM Query Generation Failed: {e}")
-        return None
+    %% Execution Engine
+    A --> H[Execution Engine]
+    H --> H1[Container Orchestration]
+    H --> H2[State Management]
+    H --> H3[Task Processing]
+    H --> H4[Resource Management]
 
-# ========== Splunk Client ==========
-def search_splunk(query, hosts):
-    for host in hosts:
-        url = f"https://{host}/services/search/jobs"
-        data = {"search": query, "output_mode": "json"}
+    %% Security Layer
+    A --> I[Security Layer]
+    I --> I1[Authentication & Authorization]
+    I --> I2[Data Protection]
+    I --> I3[Threat Protection]
+    I --> I4[Audit & Compliance]
 
-        try:
-            response = requests.post(url, auth=(SPLUNK_USERNAME, SPLUNK_PASSWORD), data=data, verify=False)
-            response.raise_for_status()
-            return response.json()
-        except Exception as e:
-            print(f"Splunk query failed on host {host}: {e}")
-            continue
-    return None
+    %% Learning & Self-Improvement
+    A --> J[Learning & Self-Improvement Systems]
+    J --> J1[Meta-Learning]
+    J --> J2[Neural Architecture Search]
+    J --> J3[Collective Intelligence]
+    J --> J4[Self-Improvement]
 
-# ========== Result Summarizer ==========
-def summarize_results(results):
-    headers = {
-        "Authorization": f"Bearer {CUSTOM_LLM_API_TOKEN}",
-        "Content-Type": "application/json"
-    }
+    %% Ethics & Safety
+    A --> K[Ethics & Safety Systems]
+    K --> K1[Value Alignment]
+    K --> K2[Explainability]
+    K --> K3[Monitoring & Oversight]
 
-    payload = {
-        "llm_service": "gpt4",
-        "question": f"Summarize the following Splunk logs:\n{results}",
-        "few_shot": "",
-        "prompt": "Summarize the Splunk logs.",
-        "user_given_context": "Splunk summarizer",
-        "output_type": "text"
-    }
+    %% Specialized Agent Patterns
+    A --> L[Specialized Agent Patterns]
+    L --> L1[Research Agent]
+    L --> L2[Coding Agent]
+    L --> L3[Planning Agent]
+    L --> L4[Creative Agent]
+    L --> L5[Manager-Worker, Expert Panel, Teacher-Student Patterns]
 
-    try:
-        response = requests.post(CUSTOM_LLM_API_URL, json=payload, headers=headers)
-        response.raise_for_status()
-        return response.json().get("summary")
-    except Exception as e:
-        print(f"LLM Summary Failed: {e}")
-        return None
-
-# ========== Agent ==========
-def run_agent(user_question):
-    app_id = extract_app_id(user_question)
-    if not app_id:
-        return "No application ID found in your question."
-
-    hosts = APP_HOST_MAPPING.get(app_id)
-    if not hosts:
-        return f"No Splunk hosts configured for application ID {app_id}."
-
-    cached = cache_result(user_question, None)
-    if cached:
-        return f"(Cached) {cached}"
-
-    query = generate_splunk_query(user_question)
-    if not query:
-        return "Failed to generate query."
-
-    results = search_splunk(query, hosts)
-    if not results:
-        return "Failed to retrieve results from Splunk."
-
-    summary = summarize_results(results)
-    if summary:
-        cache_result(user_question, summary)
-    return summary or "Could not summarize results."
-
-# ========== Main ==========
-def main():
-    print("Welcome to the Splunk LLM Agent!")
-    while True:
-        user_input = input("Ask a question (or type 'exit'): ")
-        if user_input.lower() in ["exit", "quit"]:
-            break
-        answer = run_agent(user_input)
-        print(f"\nAnswer:\n{answer}\n")
-
-if __name__ == "__main__":
-    main()
+    %% Cross-Layer Relationships
+    B4 --> G4
+    D1 --> F1
+    D4 --> J1
+    D5e --> F2
+    E1 --> F3
+    E2 --> H3
+    G2 --> H1
+    G3 --> H3
+    G4 --> K2
+    H2 --> I2
+    H3 --> J4
+    J3 --> K1
+    K3 --> I3
+    L1 --> D1
+    L2 --> D3
+    L3 --> D2
+    L4 --> D4
+    L5 --> B4
