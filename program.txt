@@ -1,106 +1,58 @@
 flowchart TD
-    %% Top-Level
-    A[Multi-Agent Organization]
+    %% SECTION 1: INPUT AND CLASSIFICATION %%
+    A["User Chat Input\n(Incident ID / List / Description)\nUsers report issues via chat interface\nwith varying levels of detail"] --> B["Input Classifier Agent\n(Classifies input type using LLM)\nUses semantic understanding to determine\ninput category and processing path"]
 
-    %% Agent Orchestration Layer
-    A --> B[Agent Orchestration Layer]
-    B --> B1[Orchestration Controller]
-    B --> B2[Agent Directory Service]
-    B --> B3[Communication Broker]
-    B --> B4[Coordination Mechanisms]
+    B -->|Incident ID| C["ServiceNow Fetch Agent\n(Fetch metadata via API)\nRetrieves complete ticket details\nincluding history and attachments"]
+    B -->|List of IDs| D["ServiceNow Loop Agent\n(Fetch multiple incidents)\nBatch processes related incidents\nto identify patterns and correlations"]
+    B -->|Problem Description| E["Description Interpreter Agent\n(LLM extracts metadata)\nConverts natural language to\nstructured incident parameters"]
 
-    %% Agent Organization Types
-    A --> C[Agent Organization Types]
-    C --> C1[Hierarchical]
-    C --> C2[Holonic]
-    C --> C3[Coalition-Based]
-    C --> C4[Market-Based]
+    %% SECTION 2: VALIDATION AND KNOWLEDGE INTEGRATION %%
+    C --> F["Input Validator Agent\n(LLM checks completeness of metadata)\nEnsures all required fields are present\nVerifies data consistency and format"]
+    D --> F
+    E --> F
 
-    %% Individual Agent Architecture
-    A --> D[Individual Agent Architecture (Enhanced BDI)]
-    D --> D1[Belief System]
-    D --> D2[Desire Engine]
-    D --> D3[Intention Planner]
-    D --> D4[Meta-Cognitive Layer]
-    D --> D5[Memory Systems]
+    F -->|Incomplete| G["Chat Feedback Agent\n(Request missing fields from user)\nGenerates natural language queries\nto obtain missing critical information"]
+    G --> F
+    F -->|Complete| H["Vector Memory Lookup Agent\n(Search for similar incidents)\nQueries vector database of past incidents\nUses semantic search to find relevant matches"]
 
-    D5 --> D5a[Working Memory]
-    D5 --> D5b[Episodic Memory]
-    D5 --> D5c[Semantic Memory]
-    D5 --> D5d[Procedural Memory]
-    D5 --> D5e[External Memory (Vector DBs)]
+    %% SECTION 3: MEMORY AND PLANNING %%
+    H --> I{"Similar Case Found?"}
+    I -->|Yes| J["Case Memory Agent\n(Retrieve past plan, resolution & docs)\nExtracts successful resolution workflows\nIdentifies relevant documentation\nAdapts previous approaches to current context"]
+    I -->|No| K["Planning Agent\n(ReAct-based step-by-step diagnostic)\nFormulates reasoning + action plan\nBreaks down complex problems\nCreates testable hypotheses"]
 
-    %% Environment Interface
-    A --> E[Environment Interface]
-    E --> E1[Perception Systems]
-    E --> E2[Action Execution]
-    E --> E3[Tool Use Framework]
-    E --> E4[Digital Environment Modeling]
+    %% SECTION 4: ORCHESTRATION LAYER %%
+    J --> L["Orchestration Layer\n(Coordinates agent activities & workflows)\nManages execution sequence and dependencies\nHandles parallelization of compatible tasks\nMonitors timeouts and sets priorities\nProvides unified context across agents"]
+    K --> L
 
-    %% Foundation Models
-    A --> F[Foundation Models & Multimodal Processing]
-    F --> F1[LLM Integration]
-    F --> F2[Model Selection & Routing]
-    F --> F3[Multimodal Processing]
+    %% SECTION 5: SPECIALIZED AGENTS %%
+    L --> M{"Dispatch to Specialized Agents"}
 
-    %% Communication Infrastructure
-    A --> G[Communication Infrastructure]
-    G --> G1[Message Structure]
-    G --> G2[Transport Mechanisms]
-    G --> G3[Communication Patterns]
-    G --> G4[Conversation Protocols]
+    M --> M1["Monitoring Agent\n(App healthcheck, metrics)\nChecks service availability\nGathers performance metrics\nMonitors SLA compliance\nTracks system resource usage"]
+    M --> M2["Log Analysis Agent\n(Parse logs, identify patterns)\nSearches for error signatures\nCorrelates events across time\nIdentifies anomalous patterns\nExtracts contextual information"]
+    M --> M3["Database Agent\n(Query errors, performance)\nExecutes diagnostic queries\nAnalyzes query performance\nChecks data integrity\nMonitors connection pools"]
+    M --> M4["Infrastructure Agent\n(K8s status, resources)\nInspects container health\nChecks node availability\nAnalyzes network connectivity\nMonitors cluster resources"]
+    M --> M5["Security Agent\n(Auth issues, anomalies)\nVerifies authentication flows\nChecks authorization policies\nScans for security events\nIdentifies potential breaches"]
 
-    %% Execution Engine
-    A --> H[Execution Engine]
-    H --> H1[Container Orchestration]
-    H --> H2[State Management]
-    H --> H3[Task Processing]
-    H --> H4[Resource Management]
+    %% SECURE AUTHENTICATION SERVICE %%
+    M1 & M2 & M3 & M4 & M5 --> Auth["Secure Auth Service\n(Token management from Vault)\nCentralized credential management\nJust-in-time access provisioning\nAuditing of all credential usage\nAutomatic token rotation"]
 
-    %% Security Layer
-    A --> I[Security Layer]
-    I --> I1[Authentication & Authorization]
-    I --> I2[Data Protection]
-    I --> I3[Threat Protection]
-    I --> I4[Audit & Compliance]
+    Auth --> N["Observation Aggregator\n(Collects all agent outputs)\nNormalizes data from different sources\nResolves conflicting information\nStructures data for analysis\nPrioritizes critical findings"]
 
-    %% Learning & Self-Improvement
-    A --> J[Learning & Self-Improvement Systems]
-    J --> J1[Meta-Learning]
-    J --> J2[Neural Architecture Search]
-    J --> J3[Collective Intelligence]
-    J --> J4[Self-Improvement]
+    %% SECTION 6: ANALYSIS AND LEARNING %%
+    N --> O["Root Cause Analyzer Agent\n(Fuses observations using LLM)\nCorrelates symptoms with causes\nBuilds causal chain of events\nRanks potential root causes\nCalculates confidence scores"]
+    O --> P["Summary & Recommendation Agent\n(Creates actionable insights)\nGenerates executive summaries\nFormulates resolution options\nPrioritizes recommended actions\nEstimates resolution time/impact"]
+    P --> Q["Continuous Learning Module\n(Updates knowledge base)\nExtracts reusable solution patterns\nRefines diagnostic approaches\nTracks resolution effectiveness\nUpdates decision boundaries"]
 
-    %% Ethics & Safety
-    A --> K[Ethics & Safety Systems]
-    K --> K1[Value Alignment]
-    K --> K2[Explainability]
-    K --> K3[Monitoring & Oversight]
+    %% SECTION 7: DECISION & ACTION %%
+    Q --> R{"Decision Boundary Check\nEvaluates risk, complexity & confidence\nChecks authority levels\nAssesses potential impact\nConsiders historical success rates"}
+    R -->|Autonomous Action| S["Auto-Remediation Agent\n(Execute pre-approved fixes)\nRuns resolution scripts\nPerforms service restarts\nUpdates configurations\nValidates successful resolution"]
+    R -->|Human Approval Needed| T["Human-AI Interface\n(Present options for approval)\nVisualizes problem & solutions\nProvides risk assessments\nShows reasoning chain\nOffers explainable recommendations"]
+    
+    T -->|Approved| S
+    T -->|Rejected| U["Alternative Solutions Agent\n(Generate new approaches)\nExplores alternative hypotheses\nConsiders edge cases\nProposes different strategies\nIncorporates human feedback"]
+    U --> T
 
-    %% Specialized Agent Patterns
-    A --> L[Specialized Agent Patterns]
-    L --> L1[Research Agent]
-    L --> L2[Coding Agent]
-    L --> L3[Planning Agent]
-    L --> L4[Creative Agent]
-    L --> L5[Manager-Worker, Expert Panel, Teacher-Student Patterns]
-
-    %% Cross-Layer Relationships
-    B4 --> G4
-    D1 --> F1
-    D4 --> J1
-    D5e --> F2
-    E1 --> F3
-    E2 --> H3
-    G2 --> H1
-    G3 --> H3
-    G4 --> K2
-    H2 --> I2
-    H3 --> J4
-    J3 --> K1
-    K3 --> I3
-    L1 --> D1
-    L2 --> D3
-    L3 --> D2
-    L4 --> D4
-    L5 --> B4
+    %% SECTION 8: CLOSEOUT AND KNOWLEDGE UPDATE %%
+    S --> V["Documentation Agent\n(Update ServiceNow & knowledge)\nGenerates detailed resolution notes\nLinks related tickets & knowledge\nCreates knowledge base articles\nDocuments lessons learned"]
+    V --> W["Vector Memory Update\n(Store incident & resolution pattern)\nIndexes full resolution chain\nUpdates similarity models\nRefines vector embeddings\nImproves future retrieval accuracy"]
+    W --> X["End"]
