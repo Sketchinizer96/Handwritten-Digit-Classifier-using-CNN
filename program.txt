@@ -1,105 +1,1533 @@
-# INCIDENT ANALYSIS AGENT
+# Import packages
+import json
+import logging
+import os
+import re
+from datetime import datetime
+from typing import Dict, List, Any, Optional
+from dataclasses import dataclass
+import asyncio
+import aiohttp
 
-## PERSONA
-You are an intelligent incident analysis agent. Your task is to analyze the provided incident description and closure notes, then internally generate a concise summary of the issue defining the problem and identify the single most appropriate tag that best represents the core problem or resolution theme of the incident.
+import splunklib.client
+from mcp.server.fastmcp import FastMCP
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import JSONResponse
+from mcp.server.sse import SseServerTransport
+from starlette.routing import Mount
+import uvicorn
+from pydantic import BaseModel
 
-## CRITICAL OUTPUT REQUIREMENT
-Your output must be ONLY the tag - no explanations, summaries, or additional text.
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[logging.StreamHandler()]
+)
+logger = logging.getLogger(__name__)
 
-## SAFETY GUIDELINES
-- Classify based solely on the ticket description and closure notes provided
-- Flag harmful or inappropriate content for review instead of classifying
-- Do NOT make assumptions about information not explicitly stated
-- Do NOT infer details that are not present in the input data
+# Environment variables
+FASTMCP_PORT = int(os.environ.get("FASTMCP_PORT", "8000"))
+VERSION = "0.3.0"
+SPLUNK_HOST = os.environ.get("SPLUNK_HOST", "localhost")
+SPLUNK_PORT = int(os.environ.get("SPLUNK_PORT", "8089"))
+SPLUNK_SCHEME = os.environ.get("SPLUNK_SCHEME", "https")
+SPLUNK_USERNAME = os.environ.get("SPLUNK_USERNAME", "admin")
+SPLUNK_PASSWORD = os.environ.get("SPLUNK_PASSWORD", "admin")
+VERIFY_SSL = os.environ.get("VERIFY_SSL", "true").lower() == "true"
 
-## DETAILED ANALYSIS PROCESS
+# AI/LLM Configuration
+LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "openai")  # openai, anthropic, azure, custom
+LLM_API_KEY = os.environ.get("LLM_API_KEY", "")
+LLM_API_URL = os.environ.get("LLM_API_URL", "")
+LLM_MODEL = os.environ.get("LLM_MODEL", "gpt-3.5-turbo")
+LLM_MAX_TOKENS = int(os.environ.get("LLM_MAX_TOKENS", "1000"))
+LLM_TEMPERATURE = float(os.environ.get("LLM_TEMPERATURE", "0.1"))
 
-### Step 1: Data Validation
-- Verify that both description and closure notes are present
-- If either field is empty or contains only placeholder text, return "Unclassified"
-- Check for nonsensical or corrupted data
+# Create FastAPI application
+app = FastAPI(title="Splunk MCP API", version=VERSION)
 
-### Step 2: Content Analysis (Internal Only)
-- Read the description completely to understand the initial problem
-- Read the closure notes completely to understand the resolution
-- Identify the primary technical issue or business impact
-- Determine the root cause if explicitly stated
-- Note any conflict between description and closure notes
+# Initialize MCP server
+mcp = FastMCP("splunk", version=VERSION, host="0.0.0.0", port=FASTMCP_PORT)
 
-### Step 3: Tag Selection Logic
-**Priority Hierarchy (in order):**
-1. **Root Cause** (if explicitly identified in closure notes)
-2. **Primary Technical Issue** (main system/service affected)
-3. **Resolution Method** (if cause is unclear but solution is specific)
-4. **Symptom Category** (only if above are unavailable)
+# SSE transport
+sse = SseServerTransport("/messages/")
+app.router.routes.append(Mount("/messages", app=sse.handle_post_message))
 
-**Selection Rules:**
-- Use ONLY tags from the predefined list
-- Choose the most specific applicable tag
-- If multiple tags could apply, select based on primary impact
-- Prioritize closure notes over description when they conflict
-- If root cause and symptoms are both mentioned, choose root cause
+# Data models for the AI query endpoint
+class QueryRequest(BaseModel):
+    query: str
+    context: Optional[str] = None
+    max_results: Optional[int] = 100
+    time_range: Optional[str] = "-24h"
 
-### Step 4: Accuracy Validation
-- Ensure selected tag directly relates to content in the ticket
-- Verify tag represents the core issue, not peripheral details
-- Confirm tag is from predefined list (no custom tags)
+@dataclass
+class ParsedQuery:
+    index: Optional[str]
+    search_terms: List[str]
+    time_range: str
+    filters: Dict[str, Any]
+    intent: str
+    confidence: float
 
-## HANDLING AMBIGUOUS CASES
+class LLMService:
+    """Service for interacting with various LLM APIs"""
+    
+    def __init__(self):
+        self.provider = LLM_PROVIDER
+        self.api_key = LLM_API_KEY
+        self.api_url = LLM_API_URL
+        self.model = LLM_MODEL
+        self.max_tokens = LLM_MAX_TOKENS
+        self.temperature = LLM_TEMPERATURE
+        
+        # Set default URLs based on provider
+        if self.provider == "openai" and not self.api_url:
+            self.api_url = "https://api.openai.com/v1/chat/completions"
+        elif self.provider == "anthropic" and not self.api_url:
+            self.api_url = "https://api.anthropic.com/v1/messages"
+        elif self.provider == "azure" and not self.api_url:
+            # Azure OpenAI format: https://YOUR_RESOURCE.openai.azure.com/openai/deployments/YOUR_DEPLOYMENT/chat/completions?api-version=2023-05-15
+            self.api_url = os.environ.get("AZURE_OPENAI_ENDPOINT", "")
+    
+    def create_splunk_query_prompt(self, user_query: str, available_indexes: List[str], context: str = "") -> str:
+        """Create a structured prompt for LLM to generate Splunk queries"""
+        
+        prompt = f"""You are a Splunk Search Processing Language (SPL) expert. Convert the following natural language query into a valid Splunk search query.
 
-**Multiple Possible Tags:**
-- Choose the tag that represents the PRIMARY issue causing the incident
-- Prioritize business-critical systems over supporting systems
-- Select cause over effect when both are present
+CONTEXT:
+- Available indexes: {', '.join(available_indexes)}
+- Additional context: {context}
 
-**Conflicting Information:**
-- Closure notes take precedence over description
-- Recent updates take precedence over initial reports
-- Technical details take precedence over user-reported symptoms
+RULES:
+1. Always start with "search" keyword
+2. Use proper SPL syntax
+3. Include appropriate time ranges if mentioned
+4. Use relevant fields and operators
+5. Add statistical operations when appropriate (stats, timechart, etc.)
+6. For error queries, look for common error fields like log_level, severity, status
+7. For performance queries, use fields like response_time, duration, latency
+8. For security queries, look for authentication, authorization, login fields
 
-**Insufficient Information:**
-- Return "Unclassified" if key details are missing
-- Do NOT guess or infer missing information
-- Do NOT create tags based on assumptions
+EXAMPLES:
+- "Show me errors from web logs" → "search index=web_logs (log_level=ERROR OR severity=error OR status>=400)"
+- "Count of failed logins today" → "search index=security earliest=@d latest=now failed OR login OR authentication | stats count"
+- "Performance issues last hour" → "search index=app_logs earliest=-1h latest=now (slow OR timeout OR performance OR response_time>1000) | stats avg(response_time) max(response_time) count"
 
-## DATA QUALITY HANDLING
-- **Typos/Misspellings:** Interpret common technical term variations
-- **Synonyms:** Recognize alternate terms for same concepts
-- **Abbreviations:** Understand standard IT abbreviations and acronyms
-- **Case Sensitivity:** Ignore case differences in matching
+USER QUERY: {user_query}
 
-## CONSISTENCY REQUIREMENTS
-- Apply identical logic for similar incident patterns
-- Use same reasoning process for each classification
-- Maintain consistent interpretation of technical terms
-- Ensure reproducible results for identical inputs
+Return only the Splunk search query without any explanation or additional text. The query should be ready to execute."""
 
-## PREDEFINED TAG COMPLIANCE
-- **Strict Adherence:** Use only tags from the provided list
-- **No Variations:** Do not modify, combine, or create new tags
-- **Exact Match:** Return tags exactly as they appear in the list
-- **Case Sensitivity:** Follow exact capitalization from predefined list
+        return prompt
+    
+    def create_result_summary_prompt(self, user_query: str, splunk_query: str, results: List[Dict], intent: str) -> str:
+        """Create a prompt for LLM to summarize search results"""
+        
+        results_preview = json.dumps(results[:5], indent=2) if results else "No results found"
+        
+        prompt = f"""You are a log analysis expert. Analyze the following Splunk search results and provide a clear, actionable summary.
 
-## QUALITY ASSURANCE CHECKS
-Before outputting tag, verify:
-- [ ] Tag exists in predefined list
-- [ ] Tag directly relates to ticket content
-- [ ] Tag represents primary issue, not secondary effects
-- [ ] Analysis based only on provided information
-- [ ] No assumptions made about unstated details
+ORIGINAL QUERY: {user_query}
+SPLUNK QUERY USED: {splunk_query}
+QUERY INTENT: {intent}
+RESULTS COUNT: {len(results)}
 
-## OUTPUT FORMAT
-**Required:** Single keyword tag in plain text format
-**Forbidden:** Explanations, reasoning, summaries, punctuation, or additional text
+SAMPLE RESULTS:
+{results_preview}
 
----
+Please provide:
+1. A brief summary of what was found
+2. Key insights or patterns
+3. Any anomalies or concerning findings
+4. Recommendations for further investigation if needed
 
-## TICKET DATA
+Keep the summary concise but informative, focusing on actionable insights."""
 
-**Description:** (description)
+        return prompt
+    
+    async def call_llm_api(self, prompt: str, max_tokens: int = None) -> str:
+        """Make API call to LLM service"""
+        max_tokens = max_tokens or self.max_tokens
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                if self.provider == "openai":
+                    return await self._call_openai(session, prompt, max_tokens)
+                elif self.provider == "anthropic":
+                    return await self._call_anthropic(session, prompt, max_tokens)
+                elif self.provider == "azure":
+                    return await self._call_azure(session, prompt, max_tokens)
+                elif self.provider == "custom":
+                    return await self._call_custom(session, prompt, max_tokens)
+                else:
+                    raise ValueError(f"Unsupported LLM provider: {self.provider}")
+        except Exception as e:
+            logger.error(f"LLM API call failed: {str(e)}")
+            raise
+    
+    async def _call_openai(self, session: aiohttp.ClientSession, prompt: str, max_tokens: int) -> str:
+        """Call OpenAI API"""
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "user", "content": prompt}
+            ],
+            "max_tokens": max_tokens,
+            "temperature": self.temperature
+        }
+        
+        async with session.post(self.api_url, headers=headers, json=payload) as response:
+            if response.status == 200:
+                data = await response.json()
+                return data["choices"][0]["message"]["content"].strip()
+            else:
+                error_text = await response.text()
+                raise Exception(f"OpenAI API error: {response.status} - {error_text}")
+    
+    async def _call_anthropic(self, session: aiohttp.ClientSession, prompt: str, max_tokens: int) -> str:
+        """Call Anthropic API"""
+        headers = {
+            "x-api-key": self.api_key,
+            "Content-Type": "application/json",
+            "anthropic-version": "2023-06-01"
+        }
+        
+        payload = {
+            "model": self.model,
+            "max_tokens": max_tokens,
+            "messages": [
+                {"role": "user", "content": prompt}
+            ]
+        }
+        
+        async with session.post(self.api_url, headers=headers, json=payload) as response:
+            if response.status == 200:
+                data = await response.json()
+                return data["content"][0]["text"].strip()
+            else:
+                error_text = await response.text()
+                raise Exception(f"Anthropic API error: {response.status} - {error_text}")
+    
+    async def _call_azure(self, session: aiohttp.ClientSession, prompt: str, max_tokens: int) -> str:
+        """Call Azure OpenAI API"""
+        headers = {
+            "api-key": self.api_key,
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "messages": [
+                {"role": "user", "content": prompt}
+            ],
+            "max_tokens": max_tokens,
+            "temperature": self.temperature
+        }
+        
+        async with session.post(self.api_url, headers=headers, json=payload) as response:
+            if response.status == 200:
+                data = await response.json()
+                return data["choices"][0]["message"]["content"].strip()
+            else:
+                error_text = await response.text()
+                raise Exception(f"Azure OpenAI API error: {response.status} - {error_text}")
+    
+    async def _call_custom(self, session: aiohttp.ClientSession, prompt: str, max_tokens: int) -> str:
+        """Call custom LLM API - adjust based on your API format"""
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        # Adjust payload format based on your custom API
+        payload = {
+            "prompt": prompt,
+            "max_tokens": max_tokens,
+            "temperature": self.temperature
+        }
+        
+        async with session.post(self.api_url, headers=headers, json=payload) as response:
+            if response.status == 200:
+                data = await response.json()
+                # Adjust response parsing based on your API format
+                return data.get("response", data.get("text", "")).strip()
+            else:
+                error_text = await response.text()
+                raise Exception(f"Custom LLM API error: {response.status} - {error_text}")
+    
+    async def generate_splunk_query(self, user_query: str, available_indexes: List[str], context: str = "") -> str:
+        """Generate Splunk query using LLM"""
+        prompt = self.create_splunk_query_prompt(user_query, available_indexes, context)
+        return await self.call_llm_api(prompt, max_tokens=500)
+    
+    async def summarize_results(self, user_query: str, splunk_query: str, results: List[Dict], intent: str) -> str:
+        """Summarize search results using LLM"""
+        prompt = self.create_result_summary_prompt(user_query, splunk_query, results, intent)
+        return await self.call_llm_api(prompt, max_tokens=800)
+    """AI-powered query analyzer that extracts key information from natural language"""
+    
+    def __init__(self):
+        self.index_patterns = [
+            r'index\s*[=:]\s*([^\s]+)',
+            r'from\s+([^\s]+)\s+index',
+            r'in\s+([^\s]+)\s+index',
+            r'search\s+([^\s]+)\s+index'
+        ]
+        
+        self.time_patterns = {
+            'last hour': '-1h',
+            'last 24 hours': '-24h',
+            'last day': '-1d',
+            'last week': '-7d',
+            'last month': '-30d',
+            'yesterday': '-1d@d',
+            'today': '@d',
+            'this week': '@w0',
+            'this month': '@mon'
+        }
+        
+        self.common_intents = {
+            'error': ['error', 'fail', 'exception', 'crash', 'problem'],
+            'performance': ['slow', 'performance', 'latency', 'response time'],
+            'security': ['security', 'breach', 'attack', 'unauthorized', 'login'],
+            'count': ['count', 'number', 'how many', 'total'],
+            'trend': ['trend', 'over time', 'chart', 'graph']
+        }
+    
+    def extract_index(self, query: str) -> Optional[str]:
+        """Extract index name from query"""
+        for pattern in self.index_patterns:
+            match = re.search(pattern, query, re.IGNORECASE)
+            if match:
+                return match.group(1)
+        return None
+    
+    def extract_time_range(self, query: str) -> str:
+        """Extract time range from natural language"""
+        query_lower = query.lower()
+        for phrase, splunk_time in self.time_patterns.items():
+            if phrase in query_lower:
+                return splunk_time
+        return "-24h"  # default
+    
+    def extract_intent(self, query: str) -> str:
+        """Determine the intent of the query"""
+        query_lower = query.lower()
+        for intent, keywords in self.common_intents.items():
+            if any(keyword in query_lower for keyword in keywords):
+                return intent
+        return "search"
+    
+    def extract_time_range_from_query(self, query: str) -> str:
+        """Extract time range from natural language"""
+        query_lower = query.lower()
+        for phrase, splunk_time in self.time_patterns.items():
+            if phrase in query_lower:
+                return splunk_time
+        return "-24h"  # default
+    
+    def extract_search_terms(self, query: str) -> List[str]:
+        """Extract key search terms from query"""
+        # Remove common stop words and extract meaningful terms
+        stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'show', 'me', 'find', 'get', 'all'}
+        words = re.findall(r'\b\w+\b', query.lower())
+        return [word for word in words if word not in stop_words and len(word) > 2]
+    
+    def extract_basic_info(self, query: str, available_indexes: List[str]) -> Dict[str, Any]:
+        """Extract basic information from query for LLM context"""
+        return {
+            "suggested_index": self.extract_index(query) or self._suggest_index(query, available_indexes),
+            "time_range": self.extract_time_range_from_query(query),
+            "intent": self.extract_intent(query),
+            "search_terms": self.extract_search_terms(query)
+        }
+    
+    def _suggest_index(self, query: str, available_indexes: List[str]) -> Optional[str]:
+        """Suggest an index based on query content"""
+        query_lower = query.lower()
+        
+        # Common patterns for index suggestion
+        index_hints = {
+            "web": ["web", "http", "apache", "nginx", "access"],
+            "app": ["application", "app", "service", "api"],
+            "security": ["login", "auth", "security", "breach", "attack"],
+            "system": ["system", "server", "cpu", "memory", "disk"],
+            "network": ["network", "firewall", "router", "switch"]
+        }
+        
+        for idx in available_indexes:
+            idx_lower = idx.lower()
+            if idx_lower in query_lower:
+                return idx
+            
+            # Check for hints
+            for hint_category, hints in index_hints.items():
+                if hint_category in idx_lower:
+                    if any(hint in query_lower for hint in hints):
+                        return idx
+        
+        return None
+    
+    def parse_query(self, query: str, available_indexes: List[str]) -> ParsedQuery:
+        """Parse natural language query into structured format"""
+        index = self.extract_index(query)
+        
+        # If no explicit index, try to infer from context
+        if not index:
+            query_lower = query.lower()
+            for idx in available_indexes:
+                if idx.lower() in query_lower:
+                    index = idx
+                    break
+        
+        search_terms = self.extract_search_terms(query)
+        time_range = self.extract_time_range(query)
+        intent = self.extract_intent(query)
+        
+        # Simple confidence scoring
+        confidence = 0.7
+        if index:
+            confidence += 0.2
+        if search_terms:
+            confidence += 0.1
+        
+        return ParsedQuery(
+            index=index,
+            search_terms=search_terms,
+            time_range=time_range,
+            filters={},
+            intent=intent,
+            confidence=min(confidence, 1.0)
+        )
 
-**Closure Notes:** (closure notes)
+class SplunkQueryGenerator:
+    """Generate Splunk queries from parsed natural language"""
+    
+    def generate_query(self, parsed: ParsedQuery, fallback_index: str = "*") -> str:
+        """Generate Splunk SPL query from parsed query"""
+        query_parts = []
+        
+        # Add index
+        index = parsed.index or fallback_index
+        if index != "*":
+            query_parts.append(f'index="{index}"')
+        
+        # Add search terms
+        if parsed.search_terms:
+            if parsed.intent == "error":
+                # For error searches, look in common error fields
+                search_terms = " OR ".join([f'"{term}"' for term in parsed.search_terms])
+                query_parts.append(f'({search_terms}) OR (log_level=ERROR) OR (severity=error)')
+            else:
+                search_terms = " AND ".join([f'"{term}"' for term in parsed.search_terms])
+                query_parts.append(f'({search_terms})')
+        
+        # Build base search
+        base_search = "search " + " ".join(query_parts) if query_parts else "search *"
+        
+        # Add intent-specific modifications
+        if parsed.intent == "count":
+            base_search += " | stats count"
+        elif parsed.intent == "trend":
+            base_search += " | timechart span=1h count"
+        elif parsed.intent == "performance":
+            base_search += " | stats avg(response_time) max(response_time) min(response_time)"
+        
+        return base_search
 
----
+class ResultSummarizer:
+    """Summarize Splunk search results"""
+    
+    def summarize_results(self, results: List[Dict], intent: str, query: str) -> Dict[str, Any]:
+        """Generate a summary of search results"""
+        if not results:
+            return {
+                "summary": "No results found for your query.",
+                "count": 0,
+                "results": []
+            }
+        
+        summary = {
+            "count": len(results),
+            "results": results[:10],  # Limit to first 10 for summary
+            "summary": self._generate_text_summary(results, intent, query)
+        }
+        
+        # Add intent-specific analysis
+        if intent == "count":
+            summary["total_count"] = sum(int(r.get("count", 0)) for r in results if "count" in r)
+        elif intent == "error":
+            summary["error_analysis"] = self._analyze_errors(results)
+        
+        return summary
+    
+    def _generate_text_summary(self, results: List[Dict], intent: str, query: str) -> str:
+        """Generate a human-readable summary"""
+        count = len(results)
+        
+        if intent == "count":
+            return f"Found {count} matching records for your query."
+        elif intent == "error":
+            return f"Found {count} error-related events. Check the error_analysis section for details."
+        elif intent == "performance":
+            return f"Found {count} performance-related events. Performance metrics are included in the results."
+        else:
+            return f"Found {count} events matching your search criteria."
+    
+    def _analyze_errors(self, results: List[Dict]) -> Dict[str, Any]:
+        """Analyze error patterns in results"""
+        error_levels = {}
+        common_errors = {}
+        
+        for result in results:
+            # Count error levels
+            level = result.get("log_level", result.get("severity", "unknown")).lower()
+            error_levels[level] = error_levels.get(level, 0) + 1
+            
+            # Look for common error patterns
+            message = result.get("message", result.get("_raw", ""))
+            if "exception" in message.lower():
+                common_errors["exceptions"] = common_errors.get("exceptions", 0) + 1
+            if "timeout" in message.lower():
+                common_errors["timeouts"] = common_errors.get("timeouts", 0) + 1
+        
+        return {
+            "error_levels": error_levels,
+            "common_patterns": common_errors
+        }
 
-**OUTPUT TAG:**
+# Initialize components
+llm_service = LLMService()
+query_analyzer = QueryAnalyzer()
+result_summarizer = ResultSummarizer()
+
+@app.get("/sse")
+async def handle_sse(request: Request):
+    """SSE endpoint for MCP communication"""
+    async with sse.connect_sse(request.scope, request.receive, request._send) as (read_stream, write_stream):
+        await mcp._mcp_server.run(read_stream, write_stream, mcp._mcp_server.create_initialization_options())
+
+def get_splunk_connection() -> splunklib.client.Service:
+    """Get a connection to the Splunk service"""
+    try:
+        service = splunklib.client.connect(
+            host=SPLUNK_HOST,
+            port=SPLUNK_PORT,
+            username=SPLUNK_USERNAME,
+            password=SPLUNK_PASSWORD,
+            scheme=SPLUNK_SCHEME,
+            verify=VERIFY_SSL
+        )
+        return service
+    except Exception as e:
+        logger.error(f"Failed to connect to Splunk: {str(e)}")
+        raise
+
+# New AI-powered query endpoint
+@app.post("/ai-query")
+async def ai_powered_query(request: QueryRequest):
+    """AI-powered natural language query processing using LLM"""
+    try:
+        # Get available indexes for context
+        service = get_splunk_connection()
+        available_indexes = [index.name for index in service.indexes]
+        
+        # Extract basic information from query
+        query_info = query_analyzer.extract_basic_info(request.query, available_indexes)
+        
+        # Generate Splunk query using LLM
+        logger.info(f"Generating Splunk query for: {request.query}")
+        splunk_query = await llm_service.generate_splunk_query(
+            request.query, 
+            available_indexes, 
+            request.context or ""
+        )
+        
+        # Clean up the generated query
+        splunk_query = splunk_query.strip()
+        if not splunk_query.startswith("search"):
+            splunk_query = "search " + splunk_query
+        
+        # Execute the search
+        time_range = request.time_range or query_info["time_range"]
+        kwargs_search = {
+            "earliest_time": time_range,
+            "latest_time": "now",
+            "preview": False,
+            "exec_mode": "blocking"
+        }
+        
+        logger.info(f"Executing LLM-generated query: {splunk_query}")
+        job = service.jobs.create(splunk_query, **kwargs_search)
+        result_stream = job.results(output_mode='json', count=request.max_results)
+        results_data = json.loads(result_stream.read().decode('utf-8'))
+        
+        # Get raw results
+        raw_results = results_data.get("results", [])
+        
+        # Generate AI summary of results
+        logger.info("Generating AI summary of results")
+        ai_summary = await llm_service.summarize_results(
+            request.query,
+            splunk_query,
+            raw_results,
+            query_info["intent"]
+        )
+        
+        # Also generate basic summary using existing logic
+        basic_summary = result_summarizer.summarize_results(
+            raw_results, 
+            query_info["intent"], 
+            request.query
+        )
+        
+        return {
+            "original_query": request.query,
+            "query_analysis": query_info,
+            "generated_splunk_query": splunk_query,
+            "execution_details": {
+                "time_range": time_range,
+                "max_results": request.max_results,
+                "results_count": len(raw_results)
+            },
+            "ai_summary": ai_summary,
+            "basic_summary": basic_summary,
+            "sample_results": raw_results[:5]  # First 5 results for preview
+        }
+        
+    except Exception as e:
+        logger.error(f"AI query processing failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Original MCP tools
+@mcp.tool()
+async def search_splunk(search_query: str, earliest_time: str = "-24h", latest_time: str = "now", max_results: int = 100) -> List[Dict[str, Any]]:
+    """Execute a Splunk search query and return results"""
+    if not search_query:
+        raise ValueError("Search query cannot be empty")
+        
+    try:
+        service = get_splunk_connection()
+        logger.info(f"Executing search: {search_query}")
+        
+        kwargs_search = {
+            "earliest_time": earliest_time,
+            "latest_time": latest_time,
+            "preview": False,
+            "exec_mode": "blocking"
+        }
+        
+        job = service.jobs.create(search_query, **kwargs_search)
+        result_stream = job.results(output_mode='json', count=max_results)
+        results_data = json.loads(result_stream.read().decode('utf-8'))
+        
+        return results_data.get("results", [])
+        
+    except Exception as e:
+        logger.error(f"Search failed: {str(e)}")
+        raise
+
+@mcp.tool()
+async def list_indexes() -> Dict[str, List[str]]:
+    """Get list of all available Splunk indexes"""
+    try:
+        service = get_splunk_connection()
+        indexes = [index.name for index in service.indexes]
+        return {"indexes": indexes}
+    except Exception as e:
+        logger.error(f"Failed to list indexes: {str(e)}")
+        raise
+
+@mcp.tool()
+async def get_index_info(index_name: str) -> Dict[str, Any]:
+    """Get metadata for a specific Splunk index"""
+    try:
+        service = get_splunk_connection()
+        index = service.indexes[index_name]
+        
+        return {
+            "name": index_name,
+            "total_event_count": str(index["totalEventCount"]),
+            "current_size": str(index["currentDBSizeMB"]),
+            "max_size": str(index["maxTotalDataSizeMB"]),
+            "min_time": str(index["minTime"]),
+            "max_time": str(index["maxTime"])
+        }
+    except KeyError:
+        raise ValueError(f"Index not found: {index_name}")
+    except Exception as e:
+        logger.error(f"Failed to get index info: {str(e)}")
+        raise
+
+@mcp.tool()
+async def current_user() -> Dict[str, Any]:
+    """Get information about the currently authenticated user"""
+    try:
+        service = get_splunk_connection()
+        current_user = service.users[SPLUNK_USERNAME]
+        
+        roles = current_user.content.get("roles", [])
+        if isinstance(roles, str):
+            roles = [roles]
+        
+        return {
+            "username": current_user.name,
+            "real_name": current_user.content.get('realname', "N/A") or "N/A",
+            "email": current_user.content.get('email', "N/A") or "N/A",
+            "roles": roles,
+            "default_app": current_user.content.get('defaultApp', "search") or "search"
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting current user: {str(e)}")
+        raise
+
+@mcp.tool()
+async def health_check() -> Dict[str, Any]:
+    """Get basic Splunk connection information and list available apps"""
+    try:
+        service = get_splunk_connection()
+        
+        apps = []
+        for app in service.apps:
+            apps.append({
+                "name": app['name'],
+                "label": app['label'],
+                "version": app['version']
+            })
+        
+        return {
+            "status": "healthy",
+            "connection": {
+                "host": SPLUNK_HOST,
+                "port": SPLUNK_PORT,
+                "scheme": SPLUNK_SCHEME,
+                "username": SPLUNK_USERNAME
+            },
+            "apps_count": len(apps),
+            "apps": apps
+        }
+        
+    except Exception as e:
+        logger.error(f"Health check failed: {str(e)}")
+        raise
+
+@mcp.tool()
+async def ping() -> Dict[str, Any]:
+    """Simple ping endpoint to check server availability"""
+    return {
+        "status": "ok",
+        "server": "splunk-mcp",
+        "version": VERSION,
+        "timestamp": datetime.now().isoformat()
+    }
+
+if __name__ == "__main__":
+    import sys
+    
+    mode = sys.argv[1] if len(sys.argv) > 1 else "sse"
+    
+    if mode not in ["stdio", "sse"]:
+        logger.error(f"Invalid mode: {mode}. Must be 'stdio' or 'sse'")
+        sys.exit(1)
+    
+    if os.environ.get("DEBUG", "false").lower() == "true":
+        logger.setLevel(logging.DEBUG)
+    
+    logger.info(f"Starting Splunk MCP server in {mode.upper()} mode")
+    
+    if mode == "stdio":
+        mcp.run(transport=mode)
+    else:
+        uvicorn.run(app, host="0.0.0.0", port=FASTMCP_PORT)
+
+
+#####
+import json
+import logging
+import re
+from typing import Dict, List, Any, Optional, Union
+from dataclasses import dataclass
+from enum import Enum
+import asyncio
+import aiohttp
+from datetime import datetime, timedelta
+import hashlib
+from collections import Counter
+
+logger = logging.getLogger(__name__)
+
+class QueryIntent(Enum):
+    """Enumeration of supported query intents"""
+    ERROR_ANALYSIS = "error_analysis"
+    PERFORMANCE_MONITORING = "performance_monitoring"
+    SECURITY_INVESTIGATION = "security_investigation"
+    TRAFFIC_ANALYSIS = "traffic_analysis"
+    USER_BEHAVIOR = "user_behavior"
+    SYSTEM_HEALTH = "system_health"
+    BUSINESS_METRICS = "business_metrics"
+    DATA_EXPLORATION = "data_exploration"
+    COMPLIANCE_AUDIT = "compliance_audit"
+    TREND_ANALYSIS = "trend_analysis"
+    ANOMALY_DETECTION = "anomaly_detection"
+    CAPACITY_PLANNING = "capacity_planning"
+
+class LLMProvider(Enum):
+    """Supported LLM providers"""
+    OPENAI = "openai"
+    ANTHROPIC = "anthropic"
+    AZURE_OPENAI = "azure"
+    GOOGLE_GEMINI = "google"
+    COHERE = "cohere"
+    CUSTOM = "custom"
+
+@dataclass
+class QueryContext:
+    """Context information for query generation"""
+    available_indexes: List[str]
+    common_fields: Dict[str, List[str]]
+    time_range: str
+    user_intent: QueryIntent
+    domain_context: Optional[str] = None
+    previous_queries: Optional[List[str]] = None
+    data_sources: Optional[List[str]] = None
+    compliance_requirements: Optional[List[str]] = None
+
+@dataclass
+class SPLGenerationResult:
+    """Result of SPL query generation"""
+    query: str
+    confidence: float
+    intent: QueryIntent
+    explanation: str
+    suggested_visualizations: List[str]
+    estimated_performance: str
+    field_mappings: Dict[str, str]
+    optimization_suggestions: List[str]
+
+@dataclass
+class SummaryResult:
+    """Result of summary generation"""
+    executive_summary: str
+    detailed_findings: List[str]
+    key_metrics: Dict[str, Any]
+    recommendations: List[str]
+    severity_assessment: str
+    next_steps: List[str]
+    confidence_score: float
+
+class IntentBasedPromptEngine:
+    """Advanced prompt engineering for different query intents"""
+    
+    def __init__(self):
+        self.intent_templates = {
+            QueryIntent.ERROR_ANALYSIS: {
+                "system_prompt": """You are a Splunk expert specializing in error analysis and troubleshooting. 
+                Generate SPL queries that effectively identify, categorize, and analyze errors in log data.""",
+                "query_patterns": [
+                    "error OR exception OR fail OR crash OR timeout",
+                    "status>=400 OR log_level=ERROR OR severity=HIGH",
+                    "| stats count by error_type, source, host",
+                    "| timechart span=1h count by error_category"
+                ],
+                "common_fields": ["error_code", "error_message", "stack_trace", "log_level", "severity"],
+                "visualizations": ["timechart", "pie_chart", "bar_chart", "heatmap"]
+            },
+            QueryIntent.PERFORMANCE_MONITORING: {
+                "system_prompt": """You are a Splunk expert specializing in performance monitoring and optimization. 
+                Generate SPL queries that effectively measure and analyze system performance metrics.""",
+                "query_patterns": [
+                    "response_time OR latency OR duration OR cpu_usage OR memory_usage",
+                    "| stats avg(response_time) max(response_time) min(response_time) by service",
+                    "| timechart span=5m avg(cpu_usage) avg(memory_usage)",
+                    "| where response_time > 5000"
+                ],
+                "common_fields": ["response_time", "cpu_usage", "memory_usage", "disk_io", "network_latency"],
+                "visualizations": ["line_chart", "gauge", "single_value", "scatter_plot"]
+            },
+            QueryIntent.SECURITY_INVESTIGATION: {
+                "system_prompt": """You are a Splunk expert specializing in security analysis and threat hunting. 
+                Generate SPL queries that effectively detect, investigate, and analyze security events.""",
+                "query_patterns": [
+                    "login OR authentication OR authorization OR breach OR attack",
+                    "| stats count by user, src_ip, action",
+                    "| where failed_attempts > 5",
+                    "| eval threat_score = case(failed_attempts > 10, \"HIGH\", failed_attempts > 5, \"MEDIUM\", 1=1, \"LOW\")"
+                ],
+                "common_fields": ["user", "src_ip", "dest_ip", "action", "result", "threat_category"],
+                "visualizations": ["geo_map", "sankey_diagram", "network_graph", "timeline"]
+            },
+            QueryIntent.TRAFFIC_ANALYSIS: {
+                "system_prompt": """You are a Splunk expert specializing in network and web traffic analysis. 
+                Generate SPL queries that effectively analyze traffic patterns, volumes, and behaviors.""",
+                "query_patterns": [
+                    "| stats sum(bytes) count by host, method, uri",
+                    "| timechart span=1h sum(requests) by status_code",
+                    "| top 10 user_agent, referer",
+                    "| where bytes > 1000000"
+                ],
+                "common_fields": ["bytes", "requests", "status_code", "method", "uri", "user_agent"],
+                "visualizations": ["area_chart", "treemap", "bubble_chart", "flow_diagram"]
+            },
+            QueryIntent.BUSINESS_METRICS: {
+                "system_prompt": """You are a Splunk expert specializing in business intelligence and KPI analysis. 
+                Generate SPL queries that effectively measure and analyze business metrics and performance indicators.""",
+                "query_patterns": [
+                    "| stats sum(revenue) avg(conversion_rate) by product, region",
+                    "| timechart span=1d sum(transactions) avg(order_value)",
+                    "| eval growth_rate = (current_value - previous_value) / previous_value * 100",
+                    "| where conversion_rate < 0.05"
+                ],
+                "common_fields": ["revenue", "transactions", "conversion_rate", "customer_id", "product"],
+                "visualizations": ["column_chart", "kpi_dashboard", "trend_line", "comparison_chart"]
+            },
+            QueryIntent.ANOMALY_DETECTION: {
+                "system_prompt": """You are a Splunk expert specializing in anomaly detection and statistical analysis. 
+                Generate SPL queries that effectively identify outliers, anomalies, and unusual patterns.""",
+                "query_patterns": [
+                    "| stats avg(value) stdev(value) by category",
+                    "| eval anomaly_score = abs(value - avg_value) / stdev_value",
+                    "| where anomaly_score > 2",
+                    "| timechart span=1h avg(metric) | anomalydetection"
+                ],
+                "common_fields": ["value", "metric", "baseline", "threshold", "deviation"],
+                "visualizations": ["anomaly_chart", "control_chart", "distribution_plot", "box_plot"]
+            }
+        }
+        
+        self.spl_optimization_rules = [
+            "Use | stats instead of | sort | head for better performance",
+            "Add index= and sourcetype= early in the search for better filtering",
+            "Use | fields to limit returned fields and improve performance",
+            "Consider using | streamstats for running calculations",
+            "Use | where instead of | search for post-processing filters",
+            "Leverage | tstats for faster statistical operations on indexed fields"
+        ]
+    
+    def generate_spl_prompt(self, user_query: str, context: QueryContext) -> str:
+        """Generate a comprehensive prompt for SPL query generation"""
+        intent_config = self.intent_templates.get(context.user_intent, self.intent_templates[QueryIntent.DATA_EXPLORATION])
+        
+        prompt = f"""
+{intent_config["system_prompt"]}
+
+TASK: Convert the following natural language query into an optimized Splunk SPL query.
+
+USER QUERY: {user_query}
+
+CONTEXT INFORMATION:
+- Available Indexes: {', '.join(context.available_indexes)}
+- Time Range: {context.time_range}
+- Intent: {context.user_intent.value}
+- Domain Context: {context.domain_context or 'General'}
+
+COMMON FIELDS FOR THIS INTENT:
+{', '.join(intent_config["common_fields"])}
+
+QUERY PATTERNS FOR THIS INTENT:
+{chr(10).join(intent_config["query_patterns"])}
+
+SPL GENERATION RULES:
+1. Start with "search" keyword
+2. Include specific index if determinable from context
+3. Use proper time range syntax
+4. Include relevant field filters
+5. Add appropriate statistical operations
+6. Optimize for performance
+7. Consider data visualization requirements
+
+OPTIMIZATION GUIDELINES:
+- Use index= and sourcetype= early in the search
+- Limit fields with | fields command when possible
+- Use | stats instead of | sort | head for aggregations
+- Add | where filters after statistical operations
+- Consider | tstats for faster statistical operations
+
+EXAMPLE PATTERNS:
+- Error Analysis: search index=app_logs (error OR exception OR fail) | stats count by error_type, host | sort - count
+- Performance: search index=metrics response_time>1000 | stats avg(response_time) p95(response_time) by service
+- Security: search index=security failed_login | stats count by user, src_ip | where count > 5
+
+REQUIRED OUTPUT FORMAT:
+Provide ONLY the SPL query without any explanation or additional text.
+"""
+        return prompt
+    
+    def generate_summary_prompt(self, user_query: str, spl_query: str, results: List[Dict], context: QueryContext) -> str:
+        """Generate a comprehensive prompt for result summarization"""
+        intent_config = self.intent_templates.get(context.user_intent, self.intent_templates[QueryIntent.DATA_EXPLORATION])
+        
+        results_sample = json.dumps(results[:10], indent=2) if results else "No results found"
+        
+        prompt = f"""
+You are a senior data analyst and Splunk expert specializing in {context.user_intent.value.replace('_', ' ')}.
+
+TASK: Analyze the following Splunk search results and provide a comprehensive, actionable summary.
+
+ORIGINAL QUERY: {user_query}
+SPL QUERY EXECUTED: {spl_query}
+INTENT: {context.user_intent.value}
+RESULTS COUNT: {len(results)}
+
+SAMPLE RESULTS:
+{results_sample}
+
+ANALYSIS REQUIREMENTS:
+1. Executive Summary (2-3 sentences)
+2. Key Findings (bullet points)
+3. Quantitative Metrics (numbers, percentages, trends)
+4. Severity Assessment (if applicable)
+5. Actionable Recommendations
+6. Next Steps for Investigation
+
+INTENT-SPECIFIC ANALYSIS:
+{self._get_intent_specific_analysis_guidance(context.user_intent)}
+
+FORMAT GUIDELINES:
+- Use clear, business-friendly language
+- Include specific numbers and metrics
+- Highlight critical issues or anomalies
+- Provide context for technical findings
+- Suggest concrete next steps
+- Rate confidence level (1-10)
+
+RESPONSE FORMAT:
+Executive Summary: [Brief overview of findings]
+
+Key Findings:
+• [Finding 1 with specific metrics]
+• [Finding 2 with specific metrics]
+• [Finding 3 with specific metrics]
+
+Quantitative Metrics:
+- Total Events: [number]
+- Time Period: [range]
+- [Relevant metric 1]: [value]
+- [Relevant metric 2]: [value]
+
+Severity Assessment: [LOW/MEDIUM/HIGH/CRITICAL with justification]
+
+Recommendations:
+1. [Immediate action with timeline]
+2. [Medium-term action with timeline]
+3. [Long-term action with timeline]
+
+Next Steps:
+- [Specific investigation step 1]
+- [Specific investigation step 2]
+- [Specific investigation step 3]
+
+Confidence Score: [1-10]/10
+"""
+        return prompt
+    
+    def _get_intent_specific_analysis_guidance(self, intent: QueryIntent) -> str:
+        """Get specific analysis guidance based on intent"""
+        guidance = {
+            QueryIntent.ERROR_ANALYSIS: """
+            - Categorize errors by type, frequency, and impact
+            - Identify error patterns and root causes
+            - Assess system stability and reliability
+            - Recommend debugging and resolution steps
+            """,
+            QueryIntent.PERFORMANCE_MONITORING: """
+            - Analyze response times, throughput, and resource utilization
+            - Identify performance bottlenecks and degradation patterns
+            - Compare against baseline metrics and SLAs
+            - Recommend optimization strategies
+            """,
+            QueryIntent.SECURITY_INVESTIGATION: """
+            - Assess threat levels and attack patterns
+            - Identify compromised accounts or systems
+            - Evaluate security control effectiveness
+            - Recommend incident response actions
+            """,
+            QueryIntent.TRAFFIC_ANALYSIS: """
+            - Analyze traffic volumes, patterns, and sources
+            - Identify unusual or suspicious traffic
+            - Evaluate capacity and performance impact
+            - Recommend traffic management strategies
+            """,
+            QueryIntent.BUSINESS_METRICS: """
+            - Analyze KPIs and business performance indicators
+            - Identify trends and growth patterns
+            - Compare against targets and benchmarks
+            - Recommend business optimization strategies
+            """,
+            QueryIntent.ANOMALY_DETECTION: """
+            - Identify statistical outliers and anomalies
+            - Assess anomaly severity and business impact
+            - Determine if anomalies indicate issues or opportunities
+            - Recommend investigation and response actions
+            """
+        }
+        return guidance.get(intent, "Provide general data analysis and insights")
+
+class AdvancedLLMService:
+    """Advanced LLM service with intent-based processing and caching"""
+    
+    def __init__(self, provider: LLMProvider = LLMProvider.OPENAI, 
+                 api_key: str = "", model: str = "gpt-3.5-turbo"):
+        self.provider = provider
+        self.api_key = api_key
+        self.model = model
+        self.prompt_engine = IntentBasedPromptEngine()
+        self.cache = {}  # Simple in-memory cache
+        self.rate_limiter = {}  # Simple rate limiting
+        
+        # Provider-specific configurations
+        self.provider_configs = {
+            LLMProvider.OPENAI: {
+                "url": "https://api.openai.com/v1/chat/completions",
+                "headers": {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                "max_tokens": 1500,
+                "temperature": 0.1
+            },
+            LLMProvider.ANTHROPIC: {
+                "url": "https://api.anthropic.com/v1/messages",
+                "headers": {"x-api-key": api_key, "Content-Type": "application/json", "anthropic-version": "2023-06-01"},
+                "max_tokens": 1500,
+                "temperature": 0.1
+            },
+            LLMProvider.AZURE_OPENAI: {
+                "url": "",  # Set via environment
+                "headers": {"api-key": api_key, "Content-Type": "application/json"},
+                "max_tokens": 1500,
+                "temperature": 0.1
+            }
+        }
+    
+    def _get_cache_key(self, prompt: str, intent: QueryIntent) -> str:
+        """Generate cache key for prompt"""
+        return hashlib.md5(f"{prompt}_{intent.value}".encode()).hexdigest()
+    
+    def _is_rate_limited(self, key: str) -> bool:
+        """Simple rate limiting check"""
+        now = datetime.now()
+        if key not in self.rate_limiter:
+            self.rate_limiter[key] = []
+        
+        # Remove old entries (older than 1 minute)
+        self.rate_limiter[key] = [t for t in self.rate_limiter[key] if now - t < timedelta(minutes=1)]
+        
+        # Check if rate limit exceeded (max 60 requests per minute)
+        if len(self.rate_limiter[key]) >= 60:
+            return True
+        
+        self.rate_limiter[key].append(now)
+        return False
+    
+    async def generate_spl_query(self, user_query: str, context: QueryContext) -> SPLGenerationResult:
+        """Generate SPL query with advanced intent-based processing"""
+        try:
+            # Check cache first
+            cache_key = self._get_cache_key(user_query, context.user_intent)
+            if cache_key in self.cache:
+                logger.info("Using cached SPL query")
+                return self.cache[cache_key]
+            
+            # Check rate limiting
+            if self._is_rate_limited(f"spl_{context.user_intent.value}"):
+                raise Exception("Rate limit exceeded for SPL generation")
+            
+            # Generate prompt
+            prompt = self.prompt_engine.generate_spl_prompt(user_query, context)
+            
+            # Call LLM API
+            spl_query = await self._call_llm_api(prompt, max_tokens=800)
+            
+            # Clean and validate query
+            cleaned_query = self._clean_spl_query(spl_query)
+            
+            # Generate result with metadata
+            result = SPLGenerationResult(
+                query=cleaned_query,
+                confidence=self._calculate_query_confidence(cleaned_query, context),
+                intent=context.user_intent,
+                explanation=self._generate_query_explanation(cleaned_query, context),
+                suggested_visualizations=self._suggest_visualizations(context.user_intent),
+                estimated_performance=self._estimate_performance(cleaned_query),
+                field_mappings=self._extract_field_mappings(cleaned_query),
+                optimization_suggestions=self._generate_optimization_suggestions(cleaned_query)
+            )
+            
+            # Cache result
+            self.cache[cache_key] = result
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"SPL generation failed: {str(e)}")
+            raise
+    
+    async def generate_summary(self, user_query: str, spl_query: str, results: List[Dict], 
+                             context: QueryContext) -> SummaryResult:
+        """Generate comprehensive summary with intent-based analysis"""
+        try:
+            # Check rate limiting
+            if self._is_rate_limited(f"summary_{context.user_intent.value}"):
+                raise Exception("Rate limit exceeded for summary generation")
+            
+            # Generate prompt
+            prompt = self.prompt_engine.generate_summary_prompt(user_query, spl_query, results, context)
+            
+            # Call LLM API
+            summary_text = await self._call_llm_api(prompt, max_tokens=1200)
+            
+            # Parse structured summary
+            parsed_summary = self._parse_summary_response(summary_text)
+            
+            # Generate result with metadata
+            result = SummaryResult(
+                executive_summary=parsed_summary.get("executive_summary", ""),
+                detailed_findings=parsed_summary.get("key_findings", []),
+                key_metrics=self._extract_metrics_from_results(results, context.user_intent),
+                recommendations=parsed_summary.get("recommendations", []),
+                severity_assessment=parsed_summary.get("severity_assessment", "MEDIUM"),
+                next_steps=parsed_summary.get("next_steps", []),
+                confidence_score=parsed_summary.get("confidence_score", 7.0)
+            )
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Summary generation failed: {str(e)}")
+            raise
+    
+    async def _call_llm_api(self, prompt: str, max_tokens: int = 1000) -> str:
+        """Make API call to LLM service"""
+        config = self.provider_configs.get(self.provider)
+        if not config:
+            raise ValueError(f"Unsupported provider: {self.provider}")
+        
+        async with aiohttp.ClientSession() as session:
+            if self.provider == LLMProvider.OPENAI:
+                return await self._call_openai_api(session, prompt, max_tokens, config)
+            elif self.provider == LLMProvider.ANTHROPIC:
+                return await self._call_anthropic_api(session, prompt, max_tokens, config)
+            elif self.provider == LLMProvider.AZURE_OPENAI:
+                return await self._call_azure_api(session, prompt, max_tokens, config)
+            else:
+                raise ValueError(f"Provider not implemented: {self.provider}")
+    
+    async def _call_openai_api(self, session: aiohttp.ClientSession, prompt: str, 
+                              max_tokens: int, config: Dict) -> str:
+        """Call OpenAI API"""
+        payload = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": max_tokens,
+            "temperature": config["temperature"]
+        }
+        
+        async with session.post(config["url"], headers=config["headers"], json=payload) as response:
+            if response.status == 200:
+                data = await response.json()
+                return data["choices"][0]["message"]["content"].strip()
+            else:
+                error_text = await response.text()
+                raise Exception(f"OpenAI API error: {response.status} - {error_text}")
+    
+    async def _call_anthropic_api(self, session: aiohttp.ClientSession, prompt: str, 
+                                 max_tokens: int, config: Dict) -> str:
+        """Call Anthropic API"""
+        payload = {
+            "model": self.model,
+            "max_tokens": max_tokens,
+            "messages": [{"role": "user", "content": prompt}]
+        }
+        
+        async with session.post(config["url"], headers=config["headers"], json=payload) as response:
+            if response.status == 200:
+                data = await response.json()
+                return data["content"][0]["text"].strip()
+            else:
+                error_text = await response.text()
+                raise Exception(f"Anthropic API error: {response.status} - {error_text}")
+    
+    async def _call_azure_api(self, session: aiohttp.ClientSession, prompt: str, 
+                             max_tokens: int, config: Dict) -> str:
+        """Call Azure OpenAI API"""
+        payload = {
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": max_tokens,
+            "temperature": config["temperature"]
+        }
+        
+        async with session.post(config["url"], headers=config["headers"], json=payload) as response:
+            if response.status == 200:
+                data = await response.json()
+                return data["choices"][0]["message"]["content"].strip()
+            else:
+                error_text = await response.text()
+                raise Exception(f"Azure OpenAI API error: {response.status} - {error_text}")
+    
+    def _clean_spl_query(self, query: str) -> str:
+        """Clean and validate SPL query"""
+        # Remove code blocks and extra whitespace
+        query = re.sub(r'```.*?```', '', query, flags=re.DOTALL)
+        query = re.sub(r'`([^`]+)`', r'\1', query)
+        query = query.strip()
+        
+        # Ensure query starts with search
+        if not query.lower().startswith('search'):
+            query = 'search ' + query
+        
+        # Remove any trailing semicolons
+        query = query.rstrip(';')
+        
+        return query
+    
+    def _calculate_query_confidence(self, query: str, context: QueryContext) -> float:
+        """Calculate confidence score for generated query"""
+        confidence = 0.5  # Base confidence
+        
+        # Check if query includes index
+        if 'index=' in query:
+            confidence += 0.2
+        
+        # Check if query includes time range
+        if any(time_term in query for time_term in ['earliest', 'latest', 'span']):
+            confidence += 0.1
+        
+        # Check if query includes statistical operations
+        if any(stat_term in query for stat_term in ['stats', 'timechart', 'chart', 'top']):
+            confidence += 0.1
+        
+        # Check if query includes relevant fields for intent
+        intent_config = self.prompt_engine.intent_templates.get(context.user_intent)
+        if intent_config:
+            common_fields = intent_config.get("common_fields", [])
+            if any(field in query for field in common_fields):
+                confidence += 0.1
+        
+        return min(confidence, 1.0)
+    
+    def _generate_query_explanation(self, query: str, context: QueryContext) -> str:
+        """Generate explanation for the SPL query"""
+        parts = []
+        
+        # Explain search filters
+        if 'index=' in query:
+            index_match = re.search(r'index=([^\s]+)', query)
+            if index_match:
+                parts.append(f"Searches the '{index_match.group(1)}' index")
+        
+        # Explain time range
+        if 'earliest' in query or 'latest' in query:
+            parts.append("Applies time range filtering")
+        
+        # Explain statistical operations
+        if '| stats' in query:
+            parts.append("Performs statistical aggregation")
+        elif '| timechart' in query:
+            parts.append("Creates time-based statistical chart")
+        elif '| top' in query:
+            parts.append("Finds most common values")
+        
+        # Explain intent-specific operations
+        if context.user_intent == QueryIntent.ERROR_ANALYSIS:
+            parts.append("Focuses on error detection and categorization")
+        elif context.user_intent == QueryIntent.PERFORMANCE_MONITORING:
+            parts.append("Analyzes performance metrics and thresholds")
+        elif context.user_intent == QueryIntent.SECURITY_INVESTIGATION:
+            parts.append("Investigates security events and patterns")
+        
+        return ". ".join(parts) + "."
+    
+    def _suggest_visualizations(self, intent: QueryIntent) -> List[str]:
+        """Suggest appropriate visualizations for the intent"""
+        intent_config = self.prompt_engine.intent_templates.get(intent)
+        if intent_config:
+            return intent_config.get("visualizations", ["table"])
+        return ["table"]
+    
+    def _estimate_performance(self, query: str) -> str:
+        """Estimate query performance impact"""
+        # Simple heuristic-based performance estimation
+        if 'index=' in query and ('earliest' in query or 'latest' in query):
+            if '| stats' in query or '| timechart' in query:
+                return "Medium - Well-optimized with proper filtering"
+            else:
+                return "Low - Good filtering but may return many results"
+        elif 'index=' in query:
+            return "Medium - Missing time range filtering"
+        else:
+            return "High - Missing index and time filtering"
+    
+    def _extract_field_mappings(self, query: str) -> Dict[str, str]:
+        """Extract field mappings from query"""
+        mappings = {}
+        
+        # Extract field references
+        field_patterns = [
+            r'\b(\w+)=',  # field=value
+            r'by (\w+)',  # by field
+            r'stats \w+\((\w+)\)',  # stats function(field)
+        ]
+        
+        for pattern in field_patterns:
+            matches = re.findall(pattern, query)
+            for match in matches:
+                mappings[match] = "detected_field"
+        
+        return mappings
+    
+    def _generate_optimization_suggestions(self, query: str) -> List[str]:
+        """Generate optimization suggestions for the query"""
+        suggestions = []
+        
+        if 'index=' not in query:
+            suggestions.append("Add index= filter to improve performance")
+        
+        if 'earliest' not in query and 'latest' not in query:
+            suggestions.append("Add time range filtering to reduce search scope")
+        
+        if '| sort' in query and '| head' in query:
+            suggestions.append("Consider using | stats instead of | sort | head for better performance")
+        
+        if '| search' in query and '| where' not in query:
+            suggestions.append("Use | where instead of | search for post-processing filters")
+        
+        if re.search(r'\*.*\*', query):
+            suggestions.append("Avoid wildcards at the beginning of search terms")
+        
+        return suggestions
+    
+    def _parse_summary_response(self, summary_text: str) -> Dict[str, Any]:
+        """Parse structured summary response"""
+        parsed = {}
+        
+        # Extract executive summary
+        exec_match = re.search(r'Executive Summary:\s*(.*?)(?=\n\n|\nKey Findings:)', summary_text, re.DOTALL)
+        if exec_match:
+            parsed["executive_summary"] = exec_match.group(1).strip()
+        
+        # Extract key findings
+        findings_match = re.search(r'Key Findings:\s*(.*?)(?=\n\n|\nQuantitative Metrics:)', summary_text, re.DOTALL)
+        if findings_match:
+            findings_text = findings_match.group(1).strip()
+            parsed["key_findings"] = [line.strip('• -') for line in findings_text.split('\n') if line.strip()]
+        
+        # Extract severity assessment
+        severity_match = re.search(r'Severity Assessment:\s*(.*?)(?=\n\n|\nRecommendations:)', summary_text, re.DOTALL)
+        if severity_match:
+            parsed["severity_assessment"] = severity_match.group(1).strip()
+        
+        # Extract recommendations
+        rec_match = re.search(r'Recommendations:\s*(.*?)(?=\n\n|\nNext Steps:)', summary_text, re.DOTALL)
+        if rec_match:
+            rec_text = rec_match.group(1).strip()
+            parsed["recommendations"] = [line.strip('1234567890. ') for line in rec_text.split('\n') if line.strip()]
+        
+        # Extract next steps
+        steps_match = re.search(r'Next Steps:\s*(.*?)(?=\n\n|\nConfidence Score:)', summary_text, re.DOTALL)
+        if steps_match:
+            steps_text = steps_match.group(1).strip()
+            parsed["next_steps"] = [line.strip('- ') for line in steps_text.split('\n') if line.strip()]
+        
+        # Extract confidence score
+        conf_match = re.search(r'Confidence Score:\s*(\d+(?:\.\d+)?)', summary_text)
+        if conf_match:
+            parsed["confidence_score"] = float(conf_match.group(1))
+        
+        return parsed
+    
+    def _extract_metrics_from_results(self, results: List[Dict], intent: QueryIntent) -> Dict[str, Any]:
+        """Extract key metrics from search results based on intent"""
+        if not results:
+            return {}
+        
+        metrics = {
+            "total_events": len(results),
+            "time_span": self._calculate_time_span(results),
+            "data_sources": len(set(r.get("source", "unknown") for r in results))
+        }
+        
+        # Intent-specific metrics
+        if intent == QueryIntent.ERROR_ANALYSIS:
+            error_messages = [r.get("error_message", "N/A") for r in results]
+            error_sources = [r.get("source", "N/A") for r in results]
+            metrics.update({
+                "error_count": len(results),
+                "unique_errors": len(set(error_messages)),
+                "top_error_source": Counter(error_sources).most_common(1)[0][0] if error_sources else "N/A"
+            })
+
+        elif intent == QueryIntent.PERFORMANCE_MONITORING:
+            response_times = [float(r['response_time']) for r in results if r.get('response_time') and isinstance(r.get('response_time'), (int, float, str)) and str(r.get('response_time')).replace('.', '', 1).isdigit()]
+            cpu_usages = [float(r['cpu_usage']) for r in results if r.get('cpu_usage') and isinstance(r.get('cpu_usage'), (int, float, str)) and str(r.get('cpu_usage')).replace('.', '', 1).isdigit()]
+            metrics.update({
+                "avg_response_time_ms": sum(response_times) / len(response_times) if response_times else 0,
+                "max_response_time_ms": max(response_times) if response_times else 0,
+                "avg_cpu_usage_percent": sum(cpu_usages) / len(cpu_usages) if cpu_usages else 0
+            })
+
+        elif intent == QueryIntent.SECURITY_INVESTIGATION:
+            src_ips = [r.get("src_ip") for r in results if r.get("src_ip")]
+            users = [r.get("user") for r in results if r.get("user")]
+            actions = [r.get("action") for r in results if r.get("action")]
+            metrics.update({
+                "unique_source_ips": len(set(src_ips)),
+                "unique_users_affected": len(set(users)),
+                "top_action_observed": Counter(actions).most_common(1)[0][0] if actions else "N/A",
+                "top_source_ip": Counter(src_ips).most_common(1)[0][0] if src_ips else "N/A"
+            })
+
+        elif intent == QueryIntent.TRAFFIC_ANALYSIS:
+            total_bytes = sum(int(r.get('bytes', 0)) for r in results if str(r.get('bytes', 0)).isdigit())
+            http_methods = [r.get("method") for r in results if r.get("method")]
+            metrics.update({
+                "total_requests": len(results),
+                "total_bytes_transferred": total_bytes,
+                "avg_bytes_per_request": total_bytes / len(results) if results else 0,
+                "top_http_method": Counter(http_methods).most_common(1)[0][0] if http_methods else "N/A"
+            })
+
+        elif intent == QueryIntent.BUSINESS_METRICS:
+            total_revenue = sum(float(r.get('revenue', 0.0)) for r in results if str(r.get('revenue', 0.0)).replace('.', '', 1).isdigit())
+            transactions = [r for r in results if r.get('transactions')]
+            metrics.update({
+                "total_revenue": total_revenue,
+                "total_transactions": len(transactions),
+                "avg_revenue_per_transaction": total_revenue / len(transactions) if transactions else 0
+            })
+
+        elif intent == QueryIntent.ANOMALY_DETECTION:
+            anomalies = [r for r in results if 'anomaly_score' in r]
+            anomaly_scores = [float(r['anomaly_score']) for r in anomalies if str(r.get('anomaly_score')).replace('.', '', 1).isdigit()]
+            metrics.update({
+                "anomalies_detected": len(anomalies),
+                "max_anomaly_score": max(anomaly_scores) if anomaly_scores else 0,
+                "avg_anomaly_score": sum(anomaly_scores) / len(anomaly_scores) if anomaly_scores else 0
+            })
+
+        return metrics
+
+    def _calculate_time_span(self, results: List[Dict]) -> str:
+        """Helper function to calculate time span from results."""
+        if not results:
+            return "N/A"
+        
+        timestamps = []
+        for r in results:
+            time_val = r.get('_time')
+            if time_val and isinstance(time_val, (int, float, str)) and str(time_val).replace('.', '', 1).isdigit():
+                timestamps.append(float(time_val))
+
+        if not timestamps:
+            return "N/A"
+        
+        try:
+            min_time = datetime.fromtimestamp(min(timestamps))
+            max_time = datetime.fromtimestamp(max(timestamps))
+            duration = max_time - min_time
+            return str(duration)
+        except (ValueError, TypeError) as e:
+            logger.warning(f"Could not calculate time span: {e}")
+            return "Invalid time format"
+
