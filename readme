@@ -1,0 +1,151 @@
+# Password Scanner for Windows Server
+
+A PowerShell tool that scans drives, folders, subfolders and files for clear-text passwords and secrets, then writes CSV, HTML and statistics reports. Exclusions and file filters are controlled from a JSON config.
+
+## Files
+
+| File | Purpose |
+|------|---------|
+| `PasswordScanner.ps1` | The scanner script |
+| `scanner-config.json` | Settings, exclusions and detection patterns |
+| `PasswordScanner.txt` | Plain-text copy of the script (rename to `.ps1` to run) |
+| `scanner-config.txt` | Plain-text copy of the config (rename to `.json` to use) |
+
+The `.txt` copies exist for easy sharing and email, where `.ps1` and `.json` attachments are often blocked. Rename them back before use.
+
+## Requirements
+
+- Windows Server with PowerShell 5.1 or later
+- Run as **Administrator** for a full scan (protected folders are skipped otherwise)
+- Keep the script and config in the same folder
+
+## Quick start
+
+1. Put `PasswordScanner.ps1` and `scanner-config.json` in one folder.
+2. Edit the exclusions in `scanner-config.json` (see below).
+3. Open PowerShell as Administrator and run:
+
+```powershell
+.\PasswordScanner.ps1
+```
+
+If script execution is blocked:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\PasswordScanner.ps1
+```
+
+Options:
+
+```powershell
+.\PasswordScanner.ps1 -ConfigPath D:\Tools\my-config.json   # use another config
+.\PasswordScanner.ps1 -NoMask                                # show real values in the report
+```
+
+Test on a small folder first (use `IncludeFilePatterns` or exclude other drives) before a full scan.
+
+## How it works
+
+- One thread walks all drives and folders. Junctions and symlinks are skipped to avoid loops.
+- File paths go into a fixed-size queue. A pool of worker threads reads files from it.
+- Binary files are skipped. Text files are read line by line.
+- Each line passes a keyword gate first, so most lines skip the regex patterns entirely.
+- Matching values that look like placeholders (`null`, `xxxxx`, `${VAR}`, `%VAR%`) are ignored.
+- Results from all workers are merged and written to the reports.
+
+## Configuration (`scanner-config.json`)
+
+### Where to scan
+
+| Setting | Meaning |
+|---------|---------|
+| `IncludeNetworkDrives` | Also scan mapped network drives (default `false`) |
+| `IncludeRemovableDrives` | Also scan removable drives (default `false`) |
+| `ExcludeDrives` | Drives to skip, e.g. `["D:", "Z:"]` |
+| `ExcludeFolders` | Full folder paths to skip, including all subfolders |
+| `ExcludeFolderNames` | Folder names to skip anywhere, e.g. `node_modules`, `.git` |
+
+### Which files to scan
+
+| Setting | Meaning |
+|---------|---------|
+| `ExcludeExtensions` | Extensions to skip, e.g. `.exe`, `.dll`, `.zip` |
+| `ExcludeFilePatterns` | Wildcard file names to skip, e.g. `*.min.js` |
+| `IncludeExtensionsOnly` | If set, only these extensions are scanned |
+| `IncludeFilePatterns` | If set, also scan files matching these names, e.g. `web.config`, `unattend*.xml` |
+| `MaxFileSizeMB` | Skip files larger than this (default 20) |
+| `MaxLineLength` | Lines longer than this are truncated before matching (default 2000) |
+
+Rules for combining them:
+
+- Exclusions always win.
+- If either include list is filled in, a file must match at least one of them (extension or name pattern).
+- If both include lists are empty, every file that is not excluded is scanned.
+
+Fast targeted run example:
+
+```json
+"IncludeFilePatterns": ["*.config", "*.xml", "*.ini", "*.ps1", "*.bat", "*.json", "*.txt"]
+```
+
+### Performance
+
+| Setting | Meaning |
+|---------|---------|
+| `WorkerThreads` | Number of parallel workers (default 4) |
+| `QueueCapacity` | Size of the file queue (default 5000) |
+
+The scan is mostly disk-bound. More than 4 to 8 threads rarely helps. Run off-peak on busy servers.
+
+### Reports and safety
+
+| Setting | Meaning |
+|---------|---------|
+| `MaskSecrets` | `true` hides password values in reports (default). `false` shows real values |
+| `RestrictReportAccess` | Locks report files to Administrators and SYSTEM |
+| `ReportDirectory` | Output folder (relative paths are next to the script) |
+| `ReportFormats` | `["CSV", "HTML"]` |
+| `PlaceholderValues` | Values to ignore, e.g. `null`, `none`, `xxxxx` |
+
+### Detection patterns
+
+`Patterns` is a list of rules. Each rule has:
+
+| Field | Meaning |
+|-------|---------|
+| `Name` | Label shown in the report |
+| `Triggers` | Keywords that must appear in a line before the regex runs |
+| `Regex` | The pattern to match |
+| `Group` | Which capture group holds the secret (`0` = whole match) |
+
+Built-in patterns cover: password assignments, secrets and API keys, credentials in URLs, XML password elements, Group Policy `cpassword`, plaintext `ConvertTo-SecureString`, Basic auth headers, private keys, AWS keys, "password is ..." sentences, alternate key names (`pw`, `passcode`, `credentials`), command-line passwords (`schtasks`, `net use`, `cmdkey`, PsExec, `sqlcmd`, MySQL, `sc config`), Azure storage keys, GitHub and Slack tokens, and JWTs.
+
+To add your own pattern, add an entry to `Patterns`. Make sure the `Triggers` words appear in whatever the regex matches, or the pattern will never fire. A pattern without `Triggers` turns the keyword gate off for the whole scan, which is slower.
+
+## Output
+
+Each run writes to the `Reports` folder:
+
+| File | Contents |
+|------|----------|
+| `PasswordScan_<server>_<time>.csv` | One row per finding (file, line, type, masked value, context, modified date, size) |
+| `PasswordScan_<server>_<time>.html` | Readable report with summary, statistics, top files and folders, and all findings |
+| `PasswordScan_<server>_<time>.stats.json` | Statistics for the run in machine-readable form |
+| `ScanHistory.csv` | One row appended per run, so you can compare scans over time |
+
+Statistics include duration, folders and files scanned, files skipped (and why), access errors, GB scanned, files and MB per second, findings by type, by drive and by extension, and the top 10 files and folders by findings.
+
+## Security notes
+
+- Reports contain the locations of exposed credentials. Treat them as sensitive.
+- Values are masked by default (for example `a***** (len 12)`). With `MaskSecrets` set to `false` or `-NoMask`, reports contain real passwords. Keep them off shares, email and tickets, and delete them after remediation.
+- Run this only on servers you own or are authorised to audit.
+- After a finding, rotate the exposed credential and remove it from the file. Deleting it from the file alone does not make it safe.
+
+## Limitations
+
+- No scanner finds every password. Passwords in free-form text with no nearby keyword, or in encoded values, can be missed.
+- Office documents, PDFs and archives (zip, 7z) are not scanned.
+- Some patterns can flag harmless text (sample code, documentation). Expect to review results and tune `PlaceholderValues` and the patterns.
+- Findings are held in memory and written at the end of the run. If the scan is stopped partway, no report is produced.
+- The script has not been benchmarked. Test on a small folder first and tune `WorkerThreads` for your server.
