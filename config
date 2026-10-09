@@ -1,0 +1,169 @@
+{
+  "IncludeNetworkDrives": false,
+  "IncludeRemovableDrives": false,
+  "WorkerThreads": 4,
+  "QueueCapacity": 5000,
+  "ExcludeDrives": ["Z:"],
+  "ExcludeFolders": [
+    "C:\\Windows",
+    "C:\\Program Files",
+    "C:\\Program Files (x86)",
+    "C:\\ProgramData\\Microsoft",
+    "C:\\$Recycle.Bin",
+    "C:\\System Volume Information"
+  ],
+  "ExcludeFolderNames": ["node_modules", ".git", "WinSxS"],
+  "ExcludeExtensions": [
+    ".exe", ".dll", ".sys", ".msi", ".msp", ".cab", ".iso", ".vhd", ".vhdx", ".wim",
+    ".zip", ".7z", ".rar", ".gz", ".tar", ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".ico",
+    ".mp3", ".mp4", ".avi", ".mkv", ".mov", ".pdf", ".pyc", ".obj", ".pdb", ".etl",
+    ".evtx", ".mdf", ".ldf", ".ndf", ".bak", ".dmp", ".lib", ".so", ".class", ".jar"
+  ],
+  "IncludeExtensionsOnly": [],
+  "IncludeFilePatterns": [],
+  "ExcludeFilePatterns": ["*.min.js", "*.designer.cs"],
+  "MaxFileSizeMB": 20,
+  "MaxLineLength": 2000,
+  "MaskSecrets": true,
+  "RestrictReportAccess": true,
+  "ReportDirectory": "Reports",
+  "ReportFormats": ["CSV", "HTML"],
+  "PlaceholderValues": [
+    "null", "none", "true", "false", "string", "empty", "undefined",
+    "your_password", "yourpassword", "xxxxx", "required", "secure"
+  ],
+  "Patterns": [
+    {
+      "Name": "Password assignment",
+      "Triggers": ["pass", "pwd"],
+      "Regex": "(?i)\\b(?:pass(?:word|wd|phrase)?|pwd)\\b[\"']?\\s*[:=]\\s*[\"']?([^\\s\"'`;,<>]{4,})",
+      "Group": 1
+    },
+    {
+      "Name": "Secret / API key / token assignment",
+      "Triggers": ["secret", "api", "access", "token"],
+      "Regex": "(?i)\\b(?:secret|api[_-]?key|access[_-]?key|auth[_-]?token|client[_-]?secret)\\b[\"']?\\s*[:=]\\s*[\"']?([^\\s\"'`;,<>]{8,})",
+      "Group": 1
+    },
+    {
+      "Name": "Credentials in URL",
+      "Triggers": ["://"],
+      "Regex": "(?i)\\b[a-z][a-z0-9+.-]*://[^/\\s:@]+:([^@\\s/]{3,})@",
+      "Group": 1
+    },
+    {
+      "Name": "XML/HTML password element",
+      "Triggers": ["<pass", "<pwd"],
+      "Regex": "(?i)<(?:password|pwd)[^>]*>([^<]{3,})</",
+      "Group": 1
+    },
+    {
+      "Name": "Group Policy cpassword",
+      "Triggers": ["cpassword"],
+      "Regex": "(?i)cpassword\\s*=\\s*\"([^\"]+)\"",
+      "Group": 1
+    },
+    {
+      "Name": "PowerShell plaintext SecureString",
+      "Triggers": ["securestring"],
+      "Regex": "(?i)ConvertTo-SecureString\\s+(?:-String\\s+)?[\"']([^\"']+)[\"']\\s+-AsPlainText",
+      "Group": 1
+    },
+    {
+      "Name": "HTTP Basic auth header",
+      "Triggers": ["authorization"],
+      "Regex": "(?i)authorization\\s*[:=]\\s*[\"']?basic\\s+([A-Za-z0-9+/=]{8,})",
+      "Group": 1
+    },
+    {
+      "Name": "Private key block",
+      "Triggers": ["private key"],
+      "Regex": "-----BEGIN (?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY-----",
+      "Group": 0
+    },
+    {
+      "Name": "AWS access key ID",
+      "Triggers": ["akia"],
+      "Regex": "\\bAKIA[0-9A-Z]{16}\\b",
+      "Group": 0
+    },
+    {
+      "Name": "Password in plain sentence",
+      "Triggers": ["password"],
+      "Regex": "(?i)\\bpassword\\s+(?:is|was)\\s+[\"']?([^\\s\"']{4,})",
+      "Group": 1
+    },
+    {
+      "Name": "Alternate password key names",
+      "Triggers": ["pw", "pswd", "passcode", "passkey", "credential"],
+      "Regex": "(?i)\\b(?:pw|pswd|passcode|passkey|credentials?)\\b[\"']?\\s*[:=]\\s*[\"']?([^\\s\"'`;,<>]{4,})",
+      "Group": 1
+    },
+    {
+      "Name": "Scheduled task password (schtasks /rp)",
+      "Triggers": ["schtasks"],
+      "Regex": "(?i)schtasks.*\\s/rp\\s+[\"']?([^\\s\"']+)",
+      "Group": 1
+    },
+    {
+      "Name": "net use password",
+      "Triggers": ["/user:"],
+      "Regex": "(?i)\\bnet\\s+use\\s+\\S+\\s+[\"']?([^\\s\"'/]+)[\"']?\\s+/user:",
+      "Group": 1
+    },
+    {
+      "Name": "cmdkey password",
+      "Triggers": ["cmdkey"],
+      "Regex": "(?i)cmdkey\\s+.*/pass:([^\\s\"']+)",
+      "Group": 1
+    },
+    {
+      "Name": "PsExec password",
+      "Triggers": ["psexec"],
+      "Regex": "(?i)psexec.*\\s-p\\s+[\"']?([^\\s\"']+)",
+      "Group": 1
+    },
+    {
+      "Name": "SQL tool password (sqlcmd/osql/bcp -P)",
+      "Triggers": ["sqlcmd", "osql", "bcp"],
+      "Regex": "(?i)\\b(?:sqlcmd|osql|bcp)\\b.*\\s-P\\s*[\"']?([^\\s\"']+)",
+      "Group": 1
+    },
+    {
+      "Name": "MySQL command-line password",
+      "Triggers": ["mysql"],
+      "Regex": "(?i)\\bmysql(?:dump)?\\b.*\\s-p([^\\s\"']{3,})",
+      "Group": 1
+    },
+    {
+      "Name": "Service account password (sc config)",
+      "Triggers": ["password="],
+      "Regex": "(?i)\\bsc(?:\\.exe)?\\s+config\\b.*\\bpassword=\\s*[\"']?([^\\s\"']+)",
+      "Group": 1
+    },
+    {
+      "Name": "Azure storage account key",
+      "Triggers": ["accountkey"],
+      "Regex": "(?i)AccountKey=([A-Za-z0-9+/=]{40,})",
+      "Group": 1
+    },
+    {
+      "Name": "GitHub token",
+      "Triggers": ["ghp_", "gho_", "ghu_", "ghs_", "ghr_"],
+      "Regex": "\\bgh[pousr]_[A-Za-z0-9]{36,}\\b",
+      "Group": 0
+    },
+    {
+      "Name": "Slack token",
+      "Triggers": ["xox"],
+      "Regex": "\\bxox[baprs]-[A-Za-z0-9-]{10,}\\b",
+      "Group": 0
+    },
+    {
+      "Name": "JSON Web Token",
+      "Triggers": ["eyj"],
+      "Regex": "\\beyJ[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}\\b",
+      "Group": 0
+    }
+  ]
+}
